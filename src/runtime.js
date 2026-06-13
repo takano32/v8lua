@@ -171,7 +171,8 @@ function metamethod(v, name) {
 
 // Parse the body of a Lua numeric constant (no sign): decimal or hex (with
 // optional hex fraction/binary exponent). Returns number | undefined.
-function parseNumberBody(text) {
+// Shared by the lexer (number literals) and luaToNumber (tonumber/coercion).
+export function parseNumberBody(text) {
   if (text.length === 0) return undefined;
   if (text[0] === '0' && (text[1] === 'x' || text[1] === 'X')) {
     const m = /^([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?(?:[pP]([+-]?[0-9]+))?$/.exec(text.slice(2));
@@ -259,6 +260,20 @@ export function luaToDisplayString(v) {
   if (v instanceof LuaClosure || v instanceof NativeFunction) return 'function: ' + addr;
   if (v instanceof LuaCoroutine) return 'thread: ' + addr;
   return 'userdata: ' + addr;
+}
+
+// Drive a runtime generator to completion in a non-coroutine context.
+// A bare YIELD bubbling out here means coroutine.yield was called with no
+// coroutine on the stack.
+export function runToCompletion(gen) {
+  let r = gen.next();
+  while (!r.done) {
+    if (r.value && r.value[YIELD]) {
+      throw new LuaError('attempt to yield from outside a coroutine');
+    }
+    r = gen.next();
+  }
+  return r.value;
 }
 
 // --- metamethod-aware operations (generators: metamethods may yield) ---

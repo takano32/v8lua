@@ -1,19 +1,13 @@
 // table.js — Lua table library.
 import {
-  LuaError, LuaTable, NativeFunction,
+  LuaError, LuaTable,
   callValue, compare, truthy, typeName, luaToNumber,
 } from '../runtime.js';
-
-function checkTable(v, n, fname) {
-  if (!(v instanceof LuaTable)) {
-    throw new LuaError(`bad argument #${n} to '${fname}' (table expected, got ${typeName(v)})`);
-  }
-  return v;
-}
+import { registrar, checkTable } from './helpers.js';
 
 export default function install(I) {
   const lib = new LuaTable();
-  const native = (name, fn) => lib.set(name, new NativeFunction(name, fn));
+  const native = registrar(lib);
 
   native('insert', function* (I, args) {
     const t = checkTable(args[0], 1, 'insert');

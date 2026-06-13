@@ -1,21 +1,15 @@
 // base.js — the Lua base library.
 import fs from 'node:fs';
 import {
-  LuaError, LuaTable, NativeFunction, LuaClosure,
+  LuaError, LuaTable, NativeFunction,
   callValue, tostringMM, typeName, truthy, getMetatable,
-  luaToNumber, numberToString, luaToDisplayString,
+  luaToNumber, numberToString,
 } from '../runtime.js';
-
-function checkTable(v, n, fname) {
-  if (!(v instanceof LuaTable)) {
-    throw new LuaError(`bad argument #${n} to '${fname}' (table expected, got ${typeName(v)})`);
-  }
-  return v;
-}
+import { registrar, checkTable } from './helpers.js';
 
 export default function install(I) {
   const G = I.globals;
-  const native = (name, fn) => G.set(name, new NativeFunction(name, fn));
+  const native = registrar(G);
 
   native('print', function* (I, args) {
     const parts = [];
@@ -48,12 +42,11 @@ export default function install(I) {
     return [luaToNumber(v, base)];
   });
 
-  const nextFn = new NativeFunction('next', function* (I, args) {
+  const nextFn = native('next', function* (I, args) {
     const t = checkTable(args[0], 1, 'next');
     const pair = t.next(args[1]);
     return pair === null ? [undefined] : pair;
   });
-  G.set('next', nextFn);
 
   native('pairs', function* (I, args) {
     checkTable(args[0], 1, 'pairs');
@@ -178,7 +171,7 @@ export default function install(I) {
     }
   });
 
-  const unpackFn = new NativeFunction('unpack', function* (I, args) {
+  native('unpack', function* (I, args) {
     const t = checkTable(args[0], 1, 'unpack');
     const i = args[1] === undefined ? 1 : luaToNumber(args[1]);
     const j = args[2] === undefined ? t.len() : luaToNumber(args[2]);
@@ -186,7 +179,6 @@ export default function install(I) {
     for (let k = i; k <= j; k++) out.push(t.get(k));
     return out;
   });
-  G.set('unpack', unpackFn);
 
   native('collectgarbage', function* (I, args) {
     return args[0] === 'count' ? [0, 0] : [0];
@@ -201,7 +193,7 @@ export default function install(I) {
     }
   }
 
-  const loadFn = new NativeFunction('load', function* (I, args) {
+  const loadFn = native('load', function* (I, args) {
     let [chunk, chunkname] = args;
     if (typeof chunk === 'string') {
       return compileChunk(chunk, typeof chunkname === 'string' ? chunkname : chunk);
@@ -218,7 +210,6 @@ export default function install(I) {
     }
     throw new LuaError(`bad argument #1 to 'load' (function expected, got ${typeName(chunk)})`);
   });
-  G.set('load', loadFn);
   G.set('loadstring', loadFn);
 
   native('loadfile', function* (I, args) {

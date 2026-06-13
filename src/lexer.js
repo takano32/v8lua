@@ -1,5 +1,5 @@
 // lexer.js — tokenizer: Lua 5.1 (+goto) source text -> Token[] per SPEC.md "Token format"
-import { LuaError } from './runtime.js';
+import { LuaError, parseNumberBody } from './runtime.js';
 
 const KEYWORDS = new Set([
   'and', 'break', 'do', 'else', 'elseif', 'end', 'false', 'for', 'function',
@@ -17,37 +17,6 @@ function isAlpha(c) {
 function isAlnum(c) { return isAlpha(c) || isDigit(c); }
 function isSpace(c) {
   return c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\v' || c === '\f';
-}
-
-// Strict parser for Lua number literal text (no sign, no surrounding space).
-// Returns the numeric value or undefined when malformed.
-function parseNumberText(text) {
-  if (text.length === 0) return undefined;
-  if (text[0] === '0' && (text[1] === 'x' || text[1] === 'X')) {
-    const body = text.slice(2);
-    const m = /^([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?(?:[pP]([+-]?[0-9]+))?$/.exec(body);
-    if (!m) return undefined;
-    const intPart = m[1];
-    const fracPart = m[2];
-    const expPart = m[3];
-    if (intPart.length === 0 && (fracPart === undefined || fracPart.length === 0)) {
-      return undefined; // "0x", "0x.", "0xp1"
-    }
-    let v = intPart.length > 0 ? parseInt(intPart, 16) : 0;
-    if (fracPart !== undefined && fracPart.length > 0) {
-      let frac = 0;
-      let scale = 1 / 16;
-      for (let i = 0; i < fracPart.length; i++) {
-        frac += parseInt(fracPart[i], 16) * scale;
-        scale /= 16;
-      }
-      v += frac;
-    }
-    if (expPart !== undefined) v *= Math.pow(2, parseInt(expPart, 10));
-    return v;
-  }
-  if (!/^(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/.test(text)) return undefined;
-  return parseFloat(text);
 }
 
 export function tokenize(source, chunkname) {
@@ -226,7 +195,7 @@ export function tokenize(source, chunkname) {
       break;
     }
     const text = source.slice(start, pos);
-    const value = parseNumberText(text);
+    const value = parseNumberBody(text);
     if (value === undefined) {
       lexError(`malformed number near '${text}'`);
     }

@@ -1,14 +1,6 @@
 // math.js — Lua math library.
-import { LuaError, LuaTable, NativeFunction, luaToNumber, typeName } from '../runtime.js';
-
-function checkNum(v, n, fname) {
-  const x = luaToNumber(v);
-  if (x === undefined) {
-    const got = v === undefined ? 'no value' : typeName(v);
-    throw new LuaError(`bad argument #${n} to '${fname}' (number expected, got ${got})`);
-  }
-  return x;
-}
+import { LuaError, LuaTable } from '../runtime.js';
+import { registrar, checkNum } from './helpers.js';
 
 // mulberry32 — deterministic seedable PRNG.
 function mulberry32(a) {
@@ -23,7 +15,7 @@ function mulberry32(a) {
 
 export default function install(I) {
   const lib = new LuaTable();
-  const native = (name, fn) => lib.set(name, new NativeFunction(name, fn));
+  const native = registrar(lib);
   const unary = (name, f) => native(name, function* (I, args) {
     return [f(checkNum(args[0], 1, name))];
   });

@@ -1,5 +1,6 @@
 // os.js — Lua os library (subset).
-import { LuaError, LuaTable, NativeFunction, luaToNumber, typeName } from '../runtime.js';
+import { LuaError, LuaTable, luaToNumber, typeName } from '../runtime.js';
+import { registrar } from './helpers.js';
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
@@ -67,7 +68,7 @@ function strftime(fmt, d, utc) {
 
 export default function install(I) {
   const lib = new LuaTable();
-  const native = (name, fn) => lib.set(name, new NativeFunction(name, fn));
+  const native = registrar(lib);
   const t0 = process.hrtime.bigint();
 
   native('clock', function* (I, args) {

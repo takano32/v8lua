@@ -3,8 +3,8 @@
 import { tokenize } from './lexer.js';
 import { parse } from './parser.js';
 import {
-  LuaError, LuaTable, LuaClosure, YIELD,
-  setClosureCall, setCurrentInterp,
+  LuaError, LuaTable, LuaClosure,
+  setClosureCall, setCurrentInterp, runToCompletion,
   callValue, index, newindex, arith, compare, concat, len,
   truthy, luaToNumber, typeName,
 } from './runtime.js';
@@ -98,15 +98,7 @@ export class Interp {
     setCurrentInterp(this);
     setClosureCall(closureCall);
     const closure = this.compile(source, chunkname);
-    const gen = callValue(closure, args);
-    let r = gen.next();
-    while (!r.done) {
-      if (r.value && r.value[YIELD]) {
-        throw new LuaError('attempt to yield from outside a coroutine');
-      }
-      r = gen.next();
-    }
-    return r.value;
+    return runToCompletion(callValue(closure, args));
   }
 
   *call(f, args) {

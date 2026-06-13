@@ -2,27 +2,10 @@
 import {
   LuaError, LuaTable, NativeFunction,
   callValue, tostringMM, typeName, truthy,
-  luaToNumber, numberToString, setStringLibrary,
+  numberToString, setStringLibrary,
 } from '../runtime.js';
+import { registrar, checkStr, checkNum, optNum } from './helpers.js';
 import { match as patMatch, capturesOf } from './lpattern.js';
-
-function checkStr(v, n, fname) {
-  if (typeof v === 'string') return v;
-  if (typeof v === 'number') return numberToString(v);
-  throw new LuaError(`bad argument #${n} to '${fname}' (string expected, got ${typeName(v)})`);
-}
-
-function checkNum(v, n, fname) {
-  const x = luaToNumber(v);
-  if (x === undefined) {
-    throw new LuaError(`bad argument #${n} to '${fname}' (number expected, got ${typeName(v)})`);
-  }
-  return x;
-}
-
-function optNum(v, def, n, fname) {
-  return v === undefined ? def : checkNum(v, n, fname);
-}
 
 // Lua 1-based relative string position -> 1-based absolute (may be out of range).
 function posrelat(pos, len) {
@@ -252,7 +235,7 @@ function substCaptures(repl, s, m) {
 
 export default function install(I) {
   const lib = new LuaTable();
-  const native = (name, fn) => lib.set(name, new NativeFunction(name, fn));
+  const native = registrar(lib);
 
   native('len', function* (I, args) {
     return [checkStr(args[0], 1, 'len').length];

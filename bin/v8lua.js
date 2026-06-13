@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { createInterp, formatError } from '../src/index.js';
-import { LuaError, LuaTable, YIELD, tostringMM } from '../src/runtime.js';
+import { LuaTable, tostringMM, runToCompletion } from '../src/runtime.js';
 
 const VERSION = 'v8lua 0.1.0 — Lua 5.1 on V8 (Node.js ' + process.version + ')';
 
@@ -14,18 +14,6 @@ function usage() {
     '  -e code   execute string code\n' +
     '  -i        enter interactive mode after running script\n' +
     '  -v        show version information\n');
-}
-
-// Drive a runtime generator to completion outside of any coroutine.
-function drive(gen) {
-  let r = gen.next();
-  while (!r.done) {
-    if (r.value && r.value[YIELD]) {
-      throw new LuaError('attempt to yield from outside a coroutine');
-    }
-    r = gen.next();
-  }
-  return r.value;
 }
 
 function main() {
@@ -103,7 +91,7 @@ function repl(I) {
         } catch { /* not an expression; run as statement */ }
         results = I.run(ranAsExpr ? 'return ' + line : line, '=stdin', []);
         if (ranAsExpr && results.length > 0) {
-          const parts = results.map(v => drive(tostringMM(v)));
+          const parts = results.map(v => runToCompletion(tostringMM(v)));
           process.stdout.write(parts.join('\t') + '\n');
         }
       } catch (e) {

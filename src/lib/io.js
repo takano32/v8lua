@@ -1,6 +1,7 @@
 // io.js — minimal io library: write + read on stdin/stdout (no file handles).
 import fs from 'node:fs';
-import { LuaError, LuaTable, NativeFunction, numberToString, typeName } from '../runtime.js';
+import { LuaError, LuaTable, numberToString, typeName } from '../runtime.js';
+import { registrar } from './helpers.js';
 
 let stdinBuf = null;
 let stdinPos = 0;
@@ -39,7 +40,7 @@ function readLine() {
 
 export default function install(I) {
   const lib = new LuaTable();
-  const native = (name, fn) => lib.set(name, new NativeFunction(name, fn));
+  const native = registrar(lib);
 
   native('write', function* (I, args) {
     for (let k = 0; k < args.length; k++) {

@@ -3,6 +3,7 @@ import {
   LuaCoroutine, LuaError, LuaTable, NativeFunction, YIELD,
   callValue, typeName,
 } from '../runtime.js';
+import { registrar } from './helpers.js';
 
 function* resumeCo(I, c, args) {
   if (!(c instanceof LuaCoroutine)) {
@@ -44,7 +45,7 @@ function* resumeCo(I, c, args) {
 
 export default function install(I) {
   const co = new LuaTable();
-  const native = (name, fn) => co.set(name, new NativeFunction(name, fn));
+  const native = registrar(co);
 
   native('create', function* (I, args) {
     const f = args[0];
