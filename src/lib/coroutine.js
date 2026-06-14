@@ -15,6 +15,10 @@ function* resumeCo(I, c, args) {
   if (prev !== undefined) prev.status = 'normal';
   I.coStack.push(c);
   c.status = 'running';
+  // Each coroutine carries its own frame stack (getfenv/setfenv levels); swap it
+  // in for the duration of the resume so a yield can't leak frames to the resumer.
+  const savedFrames = I.frames;
+  I.frames = c.frames || (c.frames = []);
   let r;
   try {
     if (!c.started) {
@@ -27,12 +31,14 @@ function* resumeCo(I, c, args) {
   } catch (e) {
     c.status = 'dead';
     I.coStack.pop();
+    I.frames = savedFrames;
     if (prev !== undefined) prev.status = 'running';
     if (e instanceof LuaError) return [false, e.luaMessage];
     if (e instanceof RangeError) return [false, 'stack overflow'];
     throw e;
   }
   I.coStack.pop();
+  I.frames = savedFrames;
   if (prev !== undefined) prev.status = 'running';
   if (r.done) {
     c.status = 'dead';

@@ -32,11 +32,39 @@ export default function install(I) {
   unary('exp', Math.exp);
   unary('deg', (x) => x * 180 / Math.PI);
   unary('rad', (x) => x * Math.PI / 180);
+  unary('log10', Math.log10);
+  unary('sinh', Math.sinh);
+  unary('cosh', Math.cosh);
+  unary('tanh', Math.tanh);
 
   native('atan', function* (I, args) {
     const y = checkNum(args[0], 1, 'atan');
     if (args[1] === undefined) return [Math.atan(y)];
     return [Math.atan2(y, checkNum(args[1], 2, 'atan'))];
+  });
+
+  native('atan2', function* (I, args) {
+    return [Math.atan2(checkNum(args[0], 1, 'atan2'), checkNum(args[1], 2, 'atan2'))];
+  });
+
+  // math.mod is the Lua 5.0 name kept for compatibility; equals fmod.
+  native('mod', function* (I, args) {
+    return [checkNum(args[0], 1, 'mod') % checkNum(args[1], 2, 'mod')];
+  });
+
+  // frexp: split x into mantissa m (0.5<=|m|<1) and exponent e with x = m*2^e.
+  native('frexp', function* (I, args) {
+    const x = checkNum(args[0], 1, 'frexp');
+    if (x === 0 || !Number.isFinite(x)) return [x, 0];
+    let e = Math.ceil(Math.log2(Math.abs(x)));
+    let m = x / Math.pow(2, e);
+    while (Math.abs(m) >= 1) { m /= 2; e++; }
+    while (Math.abs(m) < 0.5) { m *= 2; e--; }
+    return [m, e];
+  });
+
+  native('ldexp', function* (I, args) {
+    return [checkNum(args[0], 1, 'ldexp') * Math.pow(2, checkNum(args[1], 2, 'ldexp'))];
   });
 
   native('log', function* (I, args) {

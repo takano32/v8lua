@@ -35,6 +35,7 @@ function matchClass(c, cl) {
     case 117: res = isUpperC(c); break;         // u
     case 119: res = isAlnumC(c); break;         // w
     case 120: res = isXdigitC(c); break;        // x
+    case 122: res = c === 0; break;             // z: the zero byte (Lua 5.1)
     default: return cl === c;
   }
   if (cl >= 65 && cl <= 90) res = !res; // uppercase class letter complements

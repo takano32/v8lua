@@ -1,5 +1,5 @@
 // parser.js — tokens -> AST per docs/SPEC.md "AST specification".
-import { LuaError } from './runtime.js';
+import { LuaError, shortSrc } from './runtime.js';
 
 // Binary operator priorities: [left, right]. Right-assoc ops have right < left.
 const BINOP_PRI = {
@@ -16,9 +16,14 @@ const BLOCK_FOLLOW = new Set(['end', 'else', 'elseif', 'until', '<eof>']);
 
 export function parse(tokens, chunkname) {
   let pos = 0;
+  let lastLine = tokens.length > 0 ? tokens[0].line : 0; // line of the last consumed token
 
   function peek() { return tokens[pos]; }
-  function next() { return tokens[pos++]; }
+  function next() {
+    const t = tokens[pos++];
+    lastLine = t.line;
+    return t;
+  }
 
   function tokenText(t) {
     if (t.type === 'eof') return '<eof>';
@@ -29,7 +34,7 @@ export function parse(tokens, chunkname) {
 
   function syntaxError(msg, tok) {
     tok = tok || peek();
-    const e = new LuaError(`${chunkname}:${tok.line}: ${msg} near '${tokenText(tok)}'`);
+    const e = new LuaError(`${shortSrc(chunkname)}:${tok.line}: ${msg} near '${tokenText(tok)}'`);
     e.positioned = true;
     throw e;
   }
@@ -55,7 +60,7 @@ export function parse(tokens, chunkname) {
 
   // Per-function context for vararg / label checking.
   function newFuncCtx(isVararg) {
-    return { isVararg, labels: new Set(), gotos: [] };
+    return { isVararg, usesVararg: false, labels: new Set(), gotos: [] };
   }
   let funcCtx = newFuncCtx(true); // chunk is a vararg function
   let loopDepth = 0;
@@ -63,7 +68,7 @@ export function parse(tokens, chunkname) {
   function checkGotos(ctx) {
     for (const g of ctx.gotos) {
       if (!ctx.labels.has(g.label)) {
-        const e = new LuaError(`${chunkname}:${g.line}: no visible label '${g.label}' for goto`);
+        const e = new LuaError(`${shortSrc(chunkname)}:${g.line}: no visible label '${g.label}' for goto`);
         e.positioned = true;
         throw e;
       }
@@ -107,6 +112,7 @@ export function parse(tokens, chunkname) {
       case 'op':
         if (t.value === '...') {
           if (!funcCtx.isVararg) syntaxError("cannot use '...' outside a vararg function");
+          funcCtx.usesVararg = true; // using '...' suppresses the implicit 'arg' table
           next();
           return { type: 'VarargExpr', line: t.line };
         }
@@ -167,7 +173,15 @@ export function parse(tokens, chunkname) {
         const method = expectName();
         const args = parseCallArgs();
         e = { type: 'MethodCallExpr', obj: e, method, args, line: t.line };
-      } else if (isToken(t, '(') || isToken(t, '{') || t.type === 'string') {
+      } else if (isToken(t, '(')) {
+        // Lua 5.1: a call '(' on a new line is rejected as ambiguous with a
+        // statement that begins with a parenthesized expression.
+        if (t.line !== lastLine) {
+          syntaxError('ambiguous syntax (function call x new statement)', t);
+        }
+        const args = parseCallArgs();
+        e = { type: 'CallExpr', func: e, args, line: t.line };
+      } else if (isToken(t, '{') || t.type === 'string') {
         const args = parseCallArgs();
         e = { type: 'CallExpr', func: e, args, line: t.line };
       } else {
@@ -221,10 +235,13 @@ export function parse(tokens, chunkname) {
     loopDepth = 0;
     const body = parseBlock();
     checkGotos(funcCtx);
+    // Lua 5.1 (LUA_COMPAT_VARARG): a vararg function gets an implicit 'arg'
+    // table unless its body uses the '...' expression.
+    const needsArg = isVararg && !funcCtx.usesVararg;
     funcCtx = outerCtx;
     loopDepth = outerLoopDepth;
-    expect('end', `(to close 'function' at line ${line})`);
-    return { type: 'FuncExpr', params, isVararg, body, name, line };
+    const endTok = expect('end', `(to close 'function' at line ${line})`);
+    return { type: 'FuncExpr', params, isVararg, needsArg, body, name, line, lastline: endTok.line };
   }
 
   // ---------- statements ----------
@@ -236,11 +253,12 @@ export function parse(tokens, chunkname) {
       const t = peek();
       if (t.type === 'eof' || (t.type === 'keyword' && BLOCK_FOLLOW.has(t.value))) break;
       if (isToken(t, 'return')) {
-        stmts.push(parseReturn());
+        stmts.push(parseReturn()); // parseReturn consumes its own optional ';'
         break;
       }
       const s = parseStatement();
       if (s !== null) stmts.push(s);
+      accept(';'); // Lua 5.1: each statement may be followed by one ';'
     }
     return { type: 'Block', stmts, line: startTok.line };
   }
@@ -261,7 +279,6 @@ export function parse(tokens, chunkname) {
 
   function parseStatement() {
     const t = peek();
-    if (isToken(t, ';')) { next(); return null; }
     if (isToken(t, '::')) {
       next();
       const name = expectName();
@@ -273,7 +290,8 @@ export function parse(tokens, chunkname) {
       switch (t.value) {
         case 'break':
           next();
-          if (loopDepth === 0) syntaxError("no loop to break", t);
+          // Lua reports this at the token following 'break' (the current token).
+          if (loopDepth === 0) syntaxError('no loop to break');
           return { type: 'BreakStat', line: t.line };
         case 'goto': {
           next();

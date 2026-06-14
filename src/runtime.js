@@ -128,6 +128,15 @@ export class LuaCoroutine {
   }
 }
 
+// Full userdata: an opaque value with a metatable. Used for io file handles and
+// newproxy. `data` holds the JS-side payload (e.g. a file handle record).
+export class LuaUserdata {
+  constructor(data) {
+    this.data = data;
+    this.metatable = undefined;
+  }
+}
+
 // --- dependency injection (set by interp / string lib) ---
 let closureCall = null;
 let stringLibrary = null;
@@ -139,6 +148,14 @@ export function setStringLibrary(tbl) {
   stringLibrary = tbl;
   stringMetatable = new LuaTable();
   stringMetatable.set('__index', tbl);
+}
+
+// Per-basic-type metatables (Lua's lua_setmetatable for non-table types, set
+// via debug.setmetatable). Strings keep their library metatable separately.
+const typeMetatables = Object.create(null);
+export function setTypeMetatable(tname, mt) {
+  if (tname === 'string') stringMetatable = mt;
+  else typeMetatables[tname] = mt;
 }
 export function setCurrentInterp(I) { currentInterp = I; }
 export function getCurrentInterp() { return currentInterp; }
@@ -160,8 +177,9 @@ export function typeName(v) {
 
 export function getMetatable(v) {
   if (v instanceof LuaTable) return v.metatable;
+  if (v instanceof LuaUserdata) return v.metatable;
   if (typeof v === 'string') return stringMetatable;
-  return undefined;
+  return typeMetatables[typeName(v)];
 }
 
 function metamethod(v, name) {
@@ -250,8 +268,29 @@ export function numberToString(n) {
   return fixed;
 }
 
+// Lua's luaO_chunkid: turn a chunk source name into the short form used in
+// error messages and debug.getinfo's short_src. '=x' -> 'x' (verbatim),
+// '@file' -> 'file' (front-truncated if long), otherwise '[string "first line"]'.
+const ID_SIZE = 60;
+export function shortSrc(source) {
+  if (typeof source !== 'string') source = String(source);
+  if (source[0] === '=') return source.slice(1, ID_SIZE);
+  if (source[0] === '@') {
+    const s = source.slice(1);
+    if (s.length <= ID_SIZE - 1) return s;
+    return '...' + s.slice(s.length - (ID_SIZE - 4));
+  }
+  const max = ID_SIZE - 16; // leave room for the [string "..."] wrapper
+  const nl = source.indexOf('\n');
+  let s = source;
+  let trunc = false;
+  if (nl >= 0) { s = source.slice(0, nl); trunc = true; }
+  if (s.length > max) { s = s.slice(0, max); trunc = true; }
+  return `[string "${s}${trunc ? '...' : ''}"]`;
+}
+
 export function luaToDisplayString(v) {
-  if (v === undefined) return 'nil';
+  if (v === undefined || v === null) return 'nil';
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   if (typeof v === 'number') return numberToString(v);
   if (typeof v === 'string') return v;
@@ -456,10 +495,10 @@ export function* len(v) {
 export function* tostringMM(v) {
   const h = metamethod(v, '__tostring');
   if (h !== undefined) {
+    // Lua 5.1: tostring() returns the __tostring result as-is (numbers coerced
+    // to strings). It does NOT require a string — only print does (handled there).
     const r = (yield* callValue(h, [v]))[0];
-    if (typeof r === 'string') return r;
-    if (typeof r === 'number') return numberToString(r);
-    throw new LuaError("'__tostring' must return a string");
+    return typeof r === 'number' ? numberToString(r) : r;
   }
   return luaToDisplayString(v);
 }

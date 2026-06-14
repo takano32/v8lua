@@ -1,11 +1,12 @@
 // string.js — Lua string library: basics, pattern functions, string.format.
 import {
-  LuaError, LuaTable, NativeFunction,
-  callValue, tostringMM, typeName, truthy,
+  LuaError, LuaTable, LuaClosure, NativeFunction,
+  callValue, index, tostringMM, typeName, truthy,
   numberToString, setStringLibrary,
 } from '../runtime.js';
 import { registrar, checkStr, checkNum, optNum } from './helpers.js';
 import { match as patMatch, capturesOf } from './lpattern.js';
+import { closureUpvalues, DUMP_MAGIC } from '../interp.js';
 
 // Lua 1-based relative string position -> 1-based absolute (may be out of range).
 function posrelat(pos, len) {
@@ -45,7 +46,15 @@ function fmtFloatSpecial(n) {
 }
 
 function fmtFixed(n, prec) {
-  // toFixed gives at most 100 digits; fine for tests
+  // JS toFixed switches to exponential for n >= 1e21, but C's %f expands fully.
+  // Such doubles are integers, so expand the integer part exactly via BigInt and
+  // pad the fraction with zeros. (n is already non-negative here.)
+  if (n >= 1e21) {
+    const intPart = BigInt(n).toString();
+    return prec > 0 ? intPart + '.' + '0'.repeat(prec) : intPart;
+  }
+  // toFixed caps prec at 100; for larger precision pad with trailing zeros.
+  if (prec > 100) return n.toFixed(100) + '0'.repeat(prec - 100);
   return n.toFixed(prec);
 }
 
@@ -83,7 +92,7 @@ function quoteString(s) {
     } else if (cc === 13) {
       out.push('\\r');
     } else if (cc === 0) {
-      out.push('\\0');
+      out.push('\\000'); // Lua 5.1 %q emits the zero byte as \000
     } else {
       out.push(c);
     }
@@ -295,6 +304,18 @@ export default function install(I) {
 
   native('format', formatImpl);
 
+  native('dump', function* (I, args) {
+    const f = args[0];
+    if (!(f instanceof LuaClosure)) {
+      throw new LuaError("unable to dump given function");
+    }
+    // No real bytecode: serialize the AST prototype plus the names of the
+    // function's upvalues (their values are NOT preserved, as in Lua 5.1).
+    const upNames = closureUpvalues(f).map((u) => u.name);
+    const payload = JSON.stringify({ proto: f.proto, upNames, chunkname: f.chunkname });
+    return [DUMP_MAGIC + payload];
+  });
+
   // ---------- pattern functions ----------
 
   function findInit(args, s, fname) {
@@ -367,7 +388,7 @@ export default function install(I) {
       if (replType === 'string' || replType === 'number') {
         value = substCaptures(typeof repl === 'number' ? numberToString(repl) : repl, s, m);
       } else if (replType === 'table') {
-        value = repl.get(capturesOf(s, m)[0]);
+        value = yield* index(repl, capturesOf(s, m)[0]); // respects __index
       } else {
         value = (yield* callValue(repl, capturesOf(s, m)))[0];
       }
@@ -391,6 +412,8 @@ export default function install(I) {
     out.push(s.slice(Math.min(pos, s.length)));
     return [out.join(''), count];
   });
+
+  lib.set('gfind', lib.get('gmatch')); // Lua 5.1 deprecated alias
 
   I.globals.set('string', lib);
   setStringLibrary(lib);

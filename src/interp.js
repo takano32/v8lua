@@ -6,10 +6,15 @@ import {
   LuaError, LuaTable, LuaClosure,
   setClosureCall, setCurrentInterp, runToCompletion,
   callValue, index, newindex, arith, compare, concat, len,
-  truthy, luaToNumber, typeName,
+  truthy, luaToNumber, typeName, shortSrc,
 } from './runtime.js';
 
-class Scope {
+// Signature prefixing v8lua's string.dump output. v8lua has no bytecode, so
+// dump serializes the AST prototype + upvalue names; loadstring detects this
+// header and reconstructs the closure. Starts with ESC like real Lua chunks.
+export const DUMP_MAGIC = '\x1bv8luaDump\0';
+
+export class Scope {
   constructor(parent) {
     this.vars = new Map();
     this.parent = parent;
@@ -18,12 +23,124 @@ class Scope {
   }
 }
 
-function lookup(scope, name) {
+export function lookup(scope, name) {
   for (let s = scope; s !== null; s = s.parent) {
     const cell = s.vars.get(name);
     if (cell !== undefined) return cell;
   }
   return null;
+}
+
+// Ordered list of a function prototype's free variable names — names referenced
+// in its body (including nested closures) that it does not itself bind. This is
+// the candidate upvalue list; order follows Lua's first-resolution order
+// (assignment targets before their right-hand sides). Memoized on the proto.
+export function freeVarNames(proto) {
+  if (proto._freeVars) return proto._freeVars;
+  const out = [];
+  const seen = new Set();
+  const stack = []; // array of Sets, innermost last
+  const bound = (name) => stack.some((s) => s.has(name));
+  const ref = (name) => { if (!bound(name) && !seen.has(name)) { seen.add(name); out.push(name); } };
+
+  function pushScope() { stack.push(new Set()); }
+  function popScope() { stack.pop(); }
+  function declare(name) { stack[stack.length - 1].add(name); }
+
+  function walkBlock(block) {
+    pushScope();
+    for (const st of block.stmts) walkStat(st);
+    popScope();
+  }
+
+  function walkStat(st) {
+    switch (st.type) {
+      case 'LocalStat':
+        for (const e of st.exprs) walkExpr(e);
+        for (const n of st.names) declare(n);
+        break;
+      case 'LocalFuncStat':
+        declare(st.name);
+        walkExpr(st.func);
+        break;
+      case 'AssignStat':
+        for (const t of st.targets) walkExpr(t);
+        for (const e of st.exprs) walkExpr(e);
+        break;
+      case 'CallStat': walkExpr(st.expr); break;
+      case 'DoStat': walkBlock(st.body); break;
+      case 'IfStat':
+        for (const c of st.clauses) { walkExpr(c.cond); walkBlock(c.body); }
+        if (st.elseBody) walkBlock(st.elseBody);
+        break;
+      case 'WhileStat': walkExpr(st.cond); walkBlock(st.body); break;
+      case 'RepeatStat':
+        // until-condition sees the body's locals
+        pushScope();
+        for (const s of st.body.stmts) walkStat(s);
+        walkExpr(st.cond);
+        popScope();
+        break;
+      case 'NumForStat':
+        walkExpr(st.start); walkExpr(st.limit); if (st.step) walkExpr(st.step);
+        pushScope(); declare(st.name);
+        for (const s of st.body.stmts) walkStat(s);
+        popScope();
+        break;
+      case 'GenForStat':
+        for (const e of st.exprs) walkExpr(e);
+        pushScope(); for (const n of st.names) declare(n);
+        for (const s of st.body.stmts) walkStat(s);
+        popScope();
+        break;
+      case 'ReturnStat': for (const e of st.exprs) walkExpr(e); break;
+      default: break; // Break/Goto/Label: no names
+    }
+  }
+
+  function walkExpr(e) {
+    if (e == null) return;
+    switch (e.type) {
+      case 'NameExpr': ref(e.name); break;
+      case 'ParenExpr': walkExpr(e.expr); break;
+      case 'IndexExpr': walkExpr(e.obj); walkExpr(e.key); break;
+      case 'CallExpr': walkExpr(e.func); for (const a of e.args) walkExpr(a); break;
+      case 'MethodCallExpr': walkExpr(e.obj); for (const a of e.args) walkExpr(a); break;
+      case 'BinopExpr': walkExpr(e.lhs); walkExpr(e.rhs); break;
+      case 'UnopExpr': walkExpr(e.expr); break;
+      case 'TableExpr':
+        for (const f of e.fields) {
+          if (f.type === 'rec') walkExpr(f.key);
+          walkExpr(f.value);
+        }
+        break;
+      case 'FuncExpr':
+        pushScope();
+        for (const p of e.params) declare(p);
+        for (const s of e.body.stmts) walkStat(s);
+        popScope();
+        break;
+      default: break; // literals, vararg
+    }
+  }
+
+  pushScope();
+  for (const p of proto.params) declare(p);
+  for (const st of proto.body.stmts) walkStat(st);
+  popScope();
+  proto._freeVars = out;
+  return out;
+}
+
+// A closure's upvalues: free variable names that resolve to a cell in an
+// enclosing scope (names that resolve to nothing are globals, not upvalues).
+export function closureUpvalues(closure) {
+  const ups = [];
+  for (const name of freeVarNames(closure.proto)) {
+    const cell = lookup(closure.scope, name);
+    if (cell !== null) ups.push({ name, cell });
+  }
+  return ups;
 }
 
 function findVarargs(scope) {
@@ -40,45 +157,72 @@ const ARITH_OP = { '+': 'add', '-': 'sub', '*': 'mul', '/': 'div', '%': 'mod', '
 // frame instead of growing the JS stack.
 function* closureCall(closure, args) {
   const I = closure.interp;
-  for (;;) {
-    const proto = closure.proto;
-    const scope = new Scope(closure.scope);
-    for (let i = 0; i < proto.params.length; i++) {
-      scope.vars.set(proto.params[i], { v: args[i] });
-    }
-    scope.varargs = proto.isVararg ? args.slice(proto.params.length) : null;
-    const savedChunk = I.chunkname;
-    if (closure.chunkname !== undefined) I.chunkname = closure.chunkname;
-    let c;
-    try {
-      c = yield* I.execBlock(proto.body, scope);
-    } finally {
-      I.chunkname = savedChunk;
-    }
-    if (c === undefined) return [];
-    if (c.type === 'return') return c.values;
-    if (c.type === 'tailcall') {
-      if (c.f instanceof LuaClosure) {
-        closure = c.f;
-        args = c.args;
-        continue;
+  const frame = { closure, line: closure.proto.line || 0 };
+  frame.callName = I._pendingName;   // how the caller named this function (for debug.getinfo "n")
+  frame.callKind = I._pendingKind;
+  I._pendingName = undefined;
+  I._pendingKind = undefined;
+  I.frames.push(frame);
+  try {
+    for (;;) {
+      const proto = closure.proto;
+      const scope = new Scope(closure.scope);
+      for (let i = 0; i < proto.params.length; i++) {
+        scope.vars.set(proto.params[i], { v: args[i] });
       }
-      return yield* callValue(c.f, c.args);
+      const extra = proto.isVararg ? args.slice(proto.params.length) : null;
+      scope.varargs = extra;
+      if (proto.needsArg) {
+        // Lua 5.1 implicit 'arg' table: extra args at 1..n plus arg.n = count.
+        const argT = new LuaTable();
+        for (let i = 0; i < extra.length; i++) argT.set(i + 1, extra[i]);
+        argT.set('n', extra.length);
+        scope.vars.set('arg', { v: argT });
+      }
+      const savedChunk = I.chunkname;
+      if (closure.chunkname !== undefined) I.chunkname = closure.chunkname;
+      let c;
+      try {
+        c = yield* I.execBlock(proto.body, scope);
+      } finally {
+        I.chunkname = savedChunk;
+      }
+      if (c === undefined) return [];
+      if (c.type === 'return') return c.values;
+      if (c.type === 'tailcall') {
+        if (c.f instanceof LuaClosure) {
+          closure = c.f;
+          frame.closure = closure; // tail call replaces the activation
+          args = c.args;
+          continue;
+        }
+        return yield* callValue(c.f, c.args);
+      }
+      // goto with no matching label anywhere in the function body
+      throw new LuaError(`no visible label '${c.label}' for goto`);
     }
-    // goto with no matching label anywhere in the function body
-    throw new LuaError(`no visible label '${c.label}' for goto`);
+  } finally {
+    I.frames.pop();
   }
 }
 
 export class Interp {
   constructor(opts = {}) {
-    this.stdout = opts.stdout ?? ((s) => process.stdout.write(s));
-    this.stderr = opts.stderr ?? ((s) => process.stderr.write(s));
+    // Lua strings are byte strings; v8lua holds each byte as a char (0-255), so
+    // output is encoded latin1 to be byte-accurate rather than re-encoded UTF-8.
+    this.stdout = opts.stdout ?? ((s) => process.stdout.write(Buffer.from(s, 'latin1')));
+    this.stderr = opts.stderr ?? ((s) => process.stderr.write(Buffer.from(s, 'latin1')));
     this.chunkname = opts.chunkname ?? 'v8lua';
     this.globals = new LuaTable();
     this.globals.set('_G', this.globals);
+    this.genv = this.globals; // thread global environment (setfenv(0,...) changes it)
+    this.frames = [];          // stack of executing LuaClosures (for getfenv/setfenv levels)
     this.currentLine = 0;
     this.coStack = []; // running coroutines, innermost last
+    this.hook = null;   // debug hook: { fn, line, call, ret, mask } or null
+    this.inHook = false;
+    this._pendingName = undefined;
+    this._pendingKind = undefined;
     setCurrentInterp(this);
     setClosureCall(closureCall);
   }
@@ -91,7 +235,15 @@ export class Interp {
     };
     const closure = new LuaClosure(proto, null, chunkname, this);
     closure.chunkname = chunkname;
+    closure.env = this.genv; // loaded chunks run in the thread global environment
     return closure;
+  }
+
+  // Environment of the currently executing Lua function (for global name
+  // resolution); falls back to the thread global environment at top level.
+  currentEnv() {
+    const n = this.frames.length;
+    return n > 0 ? this.frames[n - 1].closure.env : this.genv;
   }
 
   run(source, chunkname = this.chunkname, args = []) {
@@ -103,6 +255,17 @@ export class Interp {
 
   *call(f, args) {
     return yield* callValue(f, args);
+  }
+
+  // Run the installed debug hook, guarding against re-entry.
+  *fireHook(event, line) {
+    if (this.hook === null || this.inHook) return;
+    this.inHook = true;
+    try {
+      yield* callValue(this.hook.fn, line === undefined ? [event] : [event, line]);
+    } finally {
+      this.inHook = false;
+    }
   }
 
   // 'local' | 'upvalue' | 'global' classification for error messages.
@@ -142,7 +305,7 @@ export class Interp {
     }
     if (e instanceof LuaError && !e.positioned) {
       if (typeof e.luaMessage === 'string') {
-        e.luaMessage = `${this.chunkname}:${line}: ${e.luaMessage}`;
+        e.luaMessage = `${shortSrc(this.chunkname)}:${line}: ${e.luaMessage}`;
       }
       e.positioned = true;
     }
@@ -172,7 +335,14 @@ export class Interp {
   }
 
   *execStat(stmt, scope) {
+    const top = this.frames[this.frames.length - 1];
+    const prevLine = top !== undefined ? top.line : -1;
     this.currentLine = stmt.line;
+    if (top !== undefined) top.line = stmt.line; // for error()/debug level walking
+    // debug line hook: fire when execution moves to a different line.
+    if (this.hook !== null && this.hook.line && !this.inHook && stmt.line !== prevLine) {
+      yield* this.fireHook('line', stmt.line);
+    }
     try {
       return yield* this.execStatInner(stmt, scope);
     } catch (e) {
@@ -194,6 +364,7 @@ export class Interp {
         scope.vars.set(stmt.name, cell);
         const f = new LuaClosure(stmt.func, scope, stmt.name, this);
         f.chunkname = this.chunkname;
+        f.env = this.currentEnv(); // inherit the creating function's environment
         cell.v = f;
         return;
       }
@@ -205,7 +376,7 @@ export class Interp {
           if (t.type === 'NameExpr') {
             const cell = lookup(scope, t.name);
             if (cell !== null) cell.v = v;
-            else yield* newindex(this.globals, t.name, v);
+            else yield* newindex(this.currentEnv(), t.name, v);
           } else {
             const obj = yield* this.evalExpr(t.obj, scope);
             const key = yield* this.evalExpr(t.key, scope);
@@ -283,8 +454,15 @@ export class Interp {
         const f = init[0];
         const s = init[1];
         let control = init[2];
+        // Lua attributes the iterator call to the line of the 'in' expressions.
+        const iterLine = stmt.exprs[stmt.exprs.length - 1].line;
         for (;;) {
-          const rets = yield* callValue(f, [s, control]);
+          let rets;
+          try {
+            rets = yield* callValue(f, [s, control]);
+          } catch (err) {
+            throw this._position(err, iterLine);
+          }
           if (rets[0] === undefined) break;
           control = rets[0];
           const iterScope = new Scope(scope);
@@ -342,6 +520,20 @@ export class Interp {
 
   *evalCall(e, scope) {
     const { f, args } = yield* this.prepareCall(e, scope);
+    // Record how this call names its target, for debug.getinfo(level, "n").
+    if (e.type === 'MethodCallExpr') {
+      this._pendingName = e.method;
+      this._pendingKind = 'method';
+    } else if (e.func.type === 'NameExpr') {
+      this._pendingName = e.func.name;
+      this._pendingKind = this._varKind(scope, e.func.name);
+    } else if (e.func.type === 'IndexExpr' && e.func.key.type === 'StringExpr') {
+      this._pendingName = e.func.key.value;
+      this._pendingKind = 'field';
+    } else {
+      this._pendingName = undefined;
+      this._pendingKind = undefined;
+    }
     try {
       return yield* callValue(f, args);
     } catch (err) {
@@ -383,7 +575,7 @@ export class Interp {
       case 'NameExpr': {
         const cell = lookup(scope, e.name);
         if (cell !== null) return cell.v;
-        return yield* index(this.globals, e.name);
+        return yield* index(this.currentEnv(), e.name);
       }
       case 'ParenExpr':
         return yield* this.evalExpr(e.expr, scope);
@@ -402,6 +594,7 @@ export class Interp {
       case 'FuncExpr': {
         const f = new LuaClosure(e, scope, e.name, this);
         f.chunkname = this.chunkname;
+        f.env = this.currentEnv(); // inherit the creating function's environment
         return f;
       }
       case 'TableExpr': {

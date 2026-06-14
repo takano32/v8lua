@@ -38,13 +38,15 @@ function oracleOutput(file, name) {
 
 function v8luaOutput(file, name) {
   const out = [];
-  // chunkname must match what luajit sees (the path we pass it) so that
-  // error-position strings compare equal
-  const I = new Interp({ stdout: (s) => out.push(s), chunkname: file });
+  // chunkname must match what luajit sees so error-position strings compare
+  // equal. Lua tags file chunks with '@<path>'; short_src renders that as the
+  // path, matching luajit's output for the same file.
+  const chunk = '@' + file;
+  const I = new Interp({ stdout: (s) => out.push(s), chunkname: chunk });
   installStdlib(I);
   const source = fs.readFileSync(file, 'utf8');
   try {
-    I.run(source, file, []);
+    I.run(source, chunk, []);
   } catch (e) {
     if (e instanceof LuaError) {
       const m = e.luaMessage;

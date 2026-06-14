@@ -1,5 +1,5 @@
 // lexer.js — tokenizer: Lua 5.1 (+goto) source text -> Token[] per SPEC.md "Token format"
-import { LuaError, parseNumberBody } from './runtime.js';
+import { LuaError, parseNumberBody, shortSrc } from './runtime.js';
 
 const KEYWORDS = new Set([
   'and', 'break', 'do', 'else', 'elseif', 'end', 'false', 'for', 'function',
@@ -26,7 +26,7 @@ export function tokenize(source, chunkname) {
   let line = 1;
 
   function lexError(msg, errLine) {
-    const e = new LuaError(`${chunkname}:${errLine === undefined ? line : errLine}: ${msg}`);
+    const e = new LuaError(`${shortSrc(chunkname)}:${errLine === undefined ? line : errLine}: ${msg}`);
     e.positioned = true;
     throw e;
   }

@@ -103,5 +103,39 @@ export default function install(I) {
     return out;
   });
 
+  // --- Lua 5.0 compatibility functions (still present in 5.1) ---
+
+  native('getn', function* (I, args) {
+    return [checkTable(args[0], 1, 'getn').len()];
+  });
+
+  native('setn', function* (I, args) {
+    checkTable(args[0], 1, 'setn');
+    throw new LuaError("'setn' is obsolete");
+  });
+
+  native('foreach', function* (I, args) {
+    const t = checkTable(args[0], 1, 'foreach');
+    const f = args[1];
+    let pair = t.next(undefined);
+    while (pair !== null) {
+      const r = (yield* callValue(f, [pair[0], pair[1]]))[0];
+      if (r !== undefined) return [r];
+      pair = t.next(pair[0]);
+    }
+    return [];
+  });
+
+  native('foreachi', function* (I, args) {
+    const t = checkTable(args[0], 1, 'foreachi');
+    const f = args[1];
+    const n = t.len();
+    for (let k = 1; k <= n; k++) {
+      const r = (yield* callValue(f, [k, t.get(k)]))[0];
+      if (r !== undefined) return [r];
+    }
+    return [];
+  });
+
   I.globals.set('table', lib);
 }

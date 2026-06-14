@@ -52,8 +52,8 @@ function main() {
       I.run(code, '=(command line)', scriptArgs);
     }
     if (script !== null) {
-      const source = fs.readFileSync(script, 'utf8')
-        .replace(/^#![^\n]*/, ''); // allow shebang lines in Lua scripts
+      const source = fs.readFileSync(script, 'latin1')
+        .replace(/^#[^\n]*/, ''); // Lua skips a leading '#' line (shebang/comment)
       I.run(source, '@' + path.basename(script), scriptArgs);
     }
   } catch (e) {
@@ -65,7 +65,7 @@ function main() {
     repl(I);
   } else if (script === null && evalChunks.length === 0) {
     // piped stdin: run it as a chunk
-    const source = fs.readFileSync(0, 'utf8');
+    const source = fs.readFileSync(0, 'latin1');
     try {
       I.run(source, '=stdin', []);
     } catch (e) {

@@ -1,6 +1,12 @@
 // os.js — Lua os library (subset).
+import fs from 'node:fs';
+import osmod from 'node:os';
+import path from 'node:path';
+import { execSync } from 'node:child_process';
 import { LuaError, LuaTable, luaToNumber, typeName } from '../runtime.js';
 import { registrar } from './helpers.js';
+
+let tmpnameCounter = 0;
 
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
@@ -134,6 +140,48 @@ export default function install(I) {
   native('exit', function* (I, args) {
     const c = args[0];
     process.exit(c === undefined || c === true ? 0 : c === false ? 1 : c);
+  });
+
+  native('setlocale', function* (I, args) {
+    // No locale support; accept the C/POSIX locale (and the "query" nil call),
+    // report failure for anything else, matching a minimal libc.
+    const loc = args[0];
+    if (loc === undefined || loc === 'C' || loc === '' || loc === 'POSIX') return ['C'];
+    return [undefined];
+  });
+
+  native('tmpname', function* (I, args) {
+    return [path.join(osmod.tmpdir(), `lua_${process.pid}_${tmpnameCounter++}`)];
+  });
+
+  native('remove', function* (I, args) {
+    const name = args[0];
+    try {
+      fs.rmSync(name, { recursive: false });
+      return [true];
+    } catch (e) {
+      return [undefined, `${name}: ${e.message}`, e.errno || -1];
+    }
+  });
+
+  native('rename', function* (I, args) {
+    try {
+      fs.renameSync(args[0], args[1]);
+      return [true];
+    } catch (e) {
+      return [undefined, `${args[0]}: ${e.message}`, e.errno || -1];
+    }
+  });
+
+  native('execute', function* (I, args) {
+    // No command => report that a shell is available (Lua returns nonzero).
+    if (args[0] === undefined) return [1];
+    try {
+      execSync(args[0], { stdio: 'inherit' });
+      return [0];
+    } catch (e) {
+      return [typeof e.status === 'number' ? e.status : 1];
+    }
   });
 
   I.globals.set('os', lib);
