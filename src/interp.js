@@ -1,6 +1,5 @@
 // interp.js — generator-based tree-walking evaluator. See docs/SPEC.md
 // "src/interp.js — exact exports" and "Evaluator architecture".
-import { tokenize } from './lexer.js';
 import { parse } from './parser.js';
 import {
   LuaError, LuaTable, LuaClosure,
@@ -221,14 +220,16 @@ export class Interp {
     this.coStack = []; // running coroutines, innermost last
     this.hook = null;   // debug hook: { fn, line, call, ret, mask } or null
     this.inHook = false;
+    this._handlerFrames = undefined; // error stack snapshot for an xpcall handler
     this._pendingName = undefined;
     this._pendingKind = undefined;
     setCurrentInterp(this);
     setClosureCall(closureCall);
   }
 
+  // `source` is a string or a reader function (pulled lazily during parsing).
   compile(source, chunkname = this.chunkname) {
-    const ast = parse(tokenize(source, chunkname), chunkname);
+    const ast = parse(source, chunkname);
     const proto = {
       type: 'FuncExpr', params: [], isVararg: true,
       body: ast.body, name: chunkname, line: 0,
@@ -309,6 +310,24 @@ export class Interp {
       }
       e.positioned = true;
     }
+    // Snapshot the call stack the first time the error is seen (frames are still
+    // intact here) so an xpcall message handler can produce a real traceback —
+    // JS try/catch has already unwound the stack by the time the handler runs.
+    if (e instanceof LuaError && e._frames === undefined) {
+      const n = this.frames.length;
+      const cap = Math.min(n, 2200);
+      const snap = new Array(cap);
+      for (let i = 0; i < cap; i++) {
+        const fr = this.frames[n - 1 - i]; // innermost first
+        snap[i] = {
+          src: shortSrc(fr.closure.chunkname),
+          line: fr.line,
+          name: fr.callName,
+          main: (fr.closure.proto.line || 0) === 0,
+        };
+      }
+      e._frames = snap;
+    }
     return e;
   }
 
@@ -369,21 +388,30 @@ export class Interp {
         return;
       }
       case 'AssignStat': {
-        const vals = yield* this.evalMulti(stmt.exprs, scope);
-        for (let i = 0; i < stmt.targets.length; i++) {
-          const t = stmt.targets[i];
-          const v = vals[i];
+        // Lua evaluates all target table/key subexpressions BEFORE the RHS and
+        // before any store, so later stores can't perturb earlier targets.
+        const refs = [];
+        for (const t of stmt.targets) {
           if (t.type === 'NameExpr') {
-            const cell = lookup(scope, t.name);
-            if (cell !== null) cell.v = v;
-            else yield* newindex(this.currentEnv(), t.name, v);
+            refs.push({ name: t.name, cell: lookup(scope, t.name) });
           } else {
             const obj = yield* this.evalExpr(t.obj, scope);
             const key = yield* this.evalExpr(t.key, scope);
+            refs.push({ obj, key, descExpr: t.obj });
+          }
+        }
+        const vals = yield* this.evalMulti(stmt.exprs, scope);
+        for (let i = 0; i < refs.length; i++) {
+          const r = refs[i];
+          const v = vals[i];
+          if (r.name !== undefined) {
+            if (r.cell !== null) r.cell.v = v;
+            else yield* newindex(this.currentEnv(), r.name, v);
+          } else {
             try {
-              yield* newindex(obj, key, v);
+              yield* newindex(r.obj, r.key, v);
             } catch (err) {
-              throw this._decorate(err, 'index', this._describeExpr(t.obj, scope), obj);
+              throw this._decorate(err, 'index', this._describeExpr(r.descExpr, scope), r.obj);
             }
           }
         }

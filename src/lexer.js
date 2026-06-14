@@ -1,4 +1,6 @@
-// lexer.js — tokenizer: Lua 5.1 (+goto) source text -> Token[] per SPEC.md "Token format"
+// lexer.js — tokenizer: Lua 5.1 (+goto) source -> tokens per SPEC.md "Token
+// format". Produces tokens lazily on demand so a `load` reader function is
+// pulled only as far as parsing needs (matching Lua's incremental loading).
 import { LuaError, parseNumberBody, shortSrc } from './runtime.js';
 
 const KEYWORDS = new Set([
@@ -15,13 +17,37 @@ function isAlpha(c) {
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c === '_';
 }
 function isAlnum(c) { return isAlpha(c) || isDigit(c); }
-function isSpace(c) {
-  return c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\v' || c === '\f';
+
+// Character source over a string or a Lua reader function. For a reader, bytes
+// are pulled (synchronously) only when an index is first accessed.
+function makeSrc(input) {
+  if (typeof input === 'string') {
+    return {
+      at: (i) => (i >= 0 && i < input.length) ? input[i] : undefined,
+      slice: (a, b) => input.slice(a, b),
+    };
+  }
+  // input is a JS reader: () => next piece (string), or undefined/'' at EOF.
+  let buf = '';
+  let done = false;
+  const fill = (i) => {
+    while (!done && buf.length <= i) {
+      const s = input();
+      if (s === undefined || s === '') { done = true; break; }
+      if (typeof s !== 'string') throw new LuaError('reader function must return a string');
+      buf += s;
+    }
+  };
+  return {
+    at: (i) => { if (i < 0) return undefined; fill(i); return i < buf.length ? buf[i] : undefined; },
+    slice: (a, b) => { fill(b - 1); return buf.slice(a, b); },
+  };
 }
 
-export function tokenize(source, chunkname) {
-  const tokens = [];
-  const len = source.length;
+// Create a lazy tokenizer. Returns { token(i) } where token(i) yields the i-th
+// token, lexing as needed; indices past EOF return the eof token.
+export function createLexer(input, chunkname) {
+  const src = makeSrc(input);
   let pos = 0;
   let line = 1;
 
@@ -31,52 +57,47 @@ export function tokenize(source, chunkname) {
     throw e;
   }
 
-  // Consume one newline at `pos` ('\n', '\r', '\r\n' or '\n\r' count as one); bumps line.
   function skipNewline() {
-    const c = source[pos];
+    const c = src.at(pos);
     pos++;
-    const d = source[pos];
+    const d = src.at(pos);
     if ((d === '\n' || d === '\r') && d !== c) pos++;
     line++;
   }
 
-  // At '[': try to read a long-bracket opener '[' '='* '['. Returns the level
-  // (number of '='), or -1 if this is not a long bracket (pos unchanged).
   function tryLongBracket() {
     let p = pos + 1;
     let level = 0;
-    while (source[p] === '=') { level++; p++; }
-    if (source[p] === '[') {
+    while (src.at(p) === '=') { level++; p++; }
+    if (src.at(p) === '[') {
       pos = p + 1;
       return level;
     }
     return -1;
   }
 
-  // Read the body of a long string/comment after the opening bracket of `level`.
-  // Returns the raw contents (first newline skipped).
   function readLongBody(level, what) {
     const startLine = line;
-    if (source[pos] === '\n' || source[pos] === '\r') skipNewline();
+    if (src.at(pos) === '\n' || src.at(pos) === '\r') skipNewline();
     const parts = [];
     let chunkStart = pos;
     for (;;) {
-      if (pos >= len) {
+      if (src.at(pos) === undefined) {
         lexError(`unfinished long ${what} near '<eof>'`, startLine);
       }
-      const c = source[pos];
+      const c = src.at(pos);
       if (c === ']') {
         let p = pos + 1;
         let lv = 0;
-        while (source[p] === '=') { lv++; p++; }
-        if (lv === level && source[p] === ']') {
-          parts.push(source.slice(chunkStart, pos));
+        while (src.at(p) === '=') { lv++; p++; }
+        if (lv === level && src.at(p) === ']') {
+          parts.push(src.slice(chunkStart, pos));
           pos = p + 1;
           return parts.join('');
         }
         pos++;
       } else if (c === '\n' || c === '\r') {
-        parts.push(source.slice(chunkStart, pos));
+        parts.push(src.slice(chunkStart, pos));
         skipNewline();
         parts.push('\n');
         chunkStart = pos;
@@ -92,29 +113,28 @@ export function tokenize(source, chunkname) {
     const parts = [];
     let chunkStart = pos;
     for (;;) {
-      if (pos >= len) {
+      if (src.at(pos) === undefined) {
         lexError(`unfinished string near '<eof>'`, startLine);
       }
-      const c = source[pos];
+      const c = src.at(pos);
       if (c === quote) {
-        parts.push(source.slice(chunkStart, pos));
+        parts.push(src.slice(chunkStart, pos));
         pos++;
         return parts.join('');
       }
       if (c === '\n' || c === '\r') {
-        lexError(`unfinished string near '${parts.join('') + source.slice(chunkStart, pos)}'`, startLine);
+        lexError(`unfinished string near '${parts.join('') + src.slice(chunkStart, pos)}'`, startLine);
       }
       if (c !== '\\') {
         pos++;
         continue;
       }
-      // escape sequence
-      parts.push(source.slice(chunkStart, pos));
+      parts.push(src.slice(chunkStart, pos));
       pos++; // skip backslash
-      if (pos >= len) {
+      if (src.at(pos) === undefined) {
         lexError(`unfinished string near '<eof>'`, startLine);
       }
-      const e = source[pos];
+      const e = src.at(pos);
       switch (e) {
         case 'a': parts.push('\x07'); pos++; break;
         case 'b': parts.push('\b'); pos++; break;
@@ -134,7 +154,7 @@ export function tokenize(source, chunkname) {
           pos++;
           let hex = '';
           for (let i = 0; i < 2; i++) {
-            const h = source[pos];
+            const h = src.at(pos);
             if (h === undefined || !isHexDigit(h)) {
               lexError(`hexadecimal digit expected near '\\x${hex}'`);
             }
@@ -146,9 +166,12 @@ export function tokenize(source, chunkname) {
         }
         case 'z': {
           pos++;
-          while (pos < len && isSpace(source[pos])) {
-            if (source[pos] === '\n' || source[pos] === '\r') skipNewline();
-            else pos++;
+          for (;;) {
+            const s = src.at(pos);
+            if (s === undefined) break;
+            if (s === '\n' || s === '\r') skipNewline();
+            else if (s === ' ' || s === '\t' || s === '\v' || s === '\f') pos++;
+            else break;
           }
           break;
         }
@@ -156,8 +179,8 @@ export function tokenize(source, chunkname) {
           if (isDigit(e)) {
             let num = 0;
             let i = 0;
-            while (i < 3 && pos < len && isDigit(source[pos])) {
-              num = num * 10 + (source.charCodeAt(pos) - 48);
+            while (i < 3 && src.at(pos) !== undefined && isDigit(src.at(pos))) {
+              num = num * 10 + (src.at(pos).charCodeAt(0) - 48);
               pos++;
               i++;
             }
@@ -177,15 +200,16 @@ export function tokenize(source, chunkname) {
 
   function readNumber() {
     const start = pos;
-    const isHex = source[pos] === '0' && (source[pos + 1] === 'x' || source[pos + 1] === 'X');
-    while (pos < len) {
-      const c = source[pos];
+    const isHex = src.at(pos) === '0' && (src.at(pos + 1) === 'x' || src.at(pos + 1) === 'X');
+    for (;;) {
+      const c = src.at(pos);
+      if (c === undefined) break;
       if (isAlnum(c) || c === '.') {
         pos++;
         continue;
       }
       if (c === '+' || c === '-') {
-        const prev = source[pos - 1];
+        const prev = src.at(pos - 1);
         if ((isHex && (prev === 'p' || prev === 'P')) ||
             (!isHex && (prev === 'e' || prev === 'E'))) {
           pos++;
@@ -194,7 +218,7 @@ export function tokenize(source, chunkname) {
       }
       break;
     }
-    const text = source.slice(start, pos);
+    const text = src.slice(start, pos);
     const value = parseNumberBody(text);
     if (value === undefined) {
       lexError(`malformed number near '${text}'`);
@@ -202,98 +226,115 @@ export function tokenize(source, chunkname) {
     return value;
   }
 
-  for (;;) {
+  function lexOneRaw() {
     // skip whitespace and comments
-    let scanning = true;
-    while (scanning && pos < len) {
-      const c = source[pos];
+    for (;;) {
+      const c = src.at(pos);
+      if (c === undefined) break;
       if (c === '\n' || c === '\r') {
         skipNewline();
       } else if (c === ' ' || c === '\t' || c === '\v' || c === '\f') {
         pos++;
-      } else if (c === '-' && source[pos + 1] === '-') {
+      } else if (c === '-' && src.at(pos + 1) === '-') {
         pos += 2;
-        if (source[pos] === '[') {
+        if (src.at(pos) === '[') {
           const level = tryLongBracket();
-          if (level >= 0) {
-            readLongBody(level, 'comment');
-            continue;
-          }
+          if (level >= 0) { readLongBody(level, 'comment'); continue; }
         }
-        // line comment
-        while (pos < len && source[pos] !== '\n' && source[pos] !== '\r') pos++;
+        while (src.at(pos) !== undefined && src.at(pos) !== '\n' && src.at(pos) !== '\r') pos++;
       } else {
-        scanning = false;
+        break;
       }
     }
 
-    if (pos >= len) {
-      tokens.push({ type: 'eof', value: '<eof>', line });
-      return tokens;
-    }
+    if (src.at(pos) === undefined) return { type: 'eof', value: '<eof>', line };
 
     const tokLine = line;
-    const c = source[pos];
+    const c = src.at(pos);
 
     if (isAlpha(c)) {
       const start = pos;
-      while (pos < len && isAlnum(source[pos])) pos++;
-      const word = source.slice(start, pos);
-      tokens.push({
-        type: KEYWORDS.has(word) ? 'keyword' : 'name',
-        value: word,
-        line: tokLine,
-      });
-      continue;
+      while (src.at(pos) !== undefined && isAlnum(src.at(pos))) pos++;
+      const word = src.slice(start, pos);
+      return { type: KEYWORDS.has(word) ? 'keyword' : 'name', value: word, line: tokLine };
     }
 
-    if (isDigit(c) || (c === '.' && isDigit(source[pos + 1]))) {
+    if (isDigit(c) || (c === '.' && isDigit(src.at(pos + 1)))) {
+      const start = pos;
       const value = readNumber();
-      tokens.push({ type: 'number', value, line: tokLine });
-      continue;
+      return { type: 'number', value, text: src.slice(start, pos), line: tokLine };
     }
 
     if (c === '"' || c === "'") {
+      const start = pos;
       const value = readShortString(c);
-      tokens.push({ type: 'string', value, line: tokLine });
-      continue;
+      return { type: 'string', value, text: src.slice(start, pos), line: tokLine };
     }
 
     if (c === '[') {
+      const start = pos;
       const level = tryLongBracket();
       if (level >= 0) {
         const value = readLongBody(level, 'string');
-        tokens.push({ type: 'string', value, line: tokLine });
-        continue;
+        return { type: 'string', value, text: src.slice(start, pos), line: tokLine };
       }
-      if (source[pos + 1] === '=') {
-        lexError(`invalid long string delimiter near '${source.slice(pos, pos + 2)}'`);
+      if (src.at(pos + 1) === '=') {
+        lexError(`invalid long string delimiter near '${src.slice(pos, pos + 2)}'`);
       }
-      tokens.push({ type: 'op', value: '[', line: tokLine });
       pos++;
-      continue;
+      return { type: 'op', value: '[', line: tokLine };
     }
 
     // operators, longest match first
-    const three = source.slice(pos, pos + 3);
-    if (three === '...') {
-      tokens.push({ type: 'op', value: '...', line: tokLine });
+    if (c === '.' && src.at(pos + 1) === '.' && src.at(pos + 2) === '.') {
       pos += 3;
-      continue;
+      return { type: 'op', value: '...', line: tokLine };
     }
-    const two = source.slice(pos, pos + 2);
+    const d = src.at(pos + 1);
+    const two = c + (d === undefined ? '' : d);
     if (two === '..' || two === '==' || two === '~=' || two === '<=' ||
         two === '>=' || two === '::') {
-      tokens.push({ type: 'op', value: two, line: tokLine });
       pos += 2;
-      continue;
+      return { type: 'op', value: two, line: tokLine };
     }
     if ('.<>=(){}];:,+-*/%^#'.indexOf(c) >= 0) {
-      tokens.push({ type: 'op', value: c, line: tokLine });
       pos++;
-      continue;
+      return { type: 'op', value: c, line: tokLine };
     }
 
     lexError(`unexpected symbol near '${c}'`);
+  }
+
+  // Like Lua's lexer, keep one character of lookahead live past each token so a
+  // reader is pulled the same number of times Lua would pull it.
+  function lexOne() {
+    const t = lexOneRaw();
+    if (t.type !== 'eof') src.at(pos);
+    return t;
+  }
+
+  const cache = [];
+  let eofIndex = -1;
+  function token(i) {
+    while (eofIndex < 0 && cache.length <= i) {
+      const t = lexOne();
+      cache.push(t);
+      if (t.type === 'eof') eofIndex = cache.length - 1;
+    }
+    if (eofIndex >= 0 && i > eofIndex) return cache[eofIndex];
+    return cache[i];
+  }
+
+  return { token };
+}
+
+// Eagerly tokenize a string into an array (kept for compatibility/tools).
+export function tokenize(source, chunkname) {
+  const lx = createLexer(source, chunkname);
+  const out = [];
+  for (let i = 0; ; i++) {
+    const t = lx.token(i);
+    out.push(t);
+    if (t.type === 'eof') return out;
   }
 }

@@ -1,5 +1,7 @@
-// parser.js — tokens -> AST per docs/SPEC.md "AST specification".
+// parser.js — source -> AST per docs/SPEC.md "AST specification". Pulls tokens
+// lazily from the lexer so a `load` reader is read only as far as needed.
 import { LuaError, shortSrc } from './runtime.js';
+import { createLexer } from './lexer.js';
 
 // Binary operator priorities: [left, right]. Right-assoc ops have right < left.
 const BINOP_PRI = {
@@ -14,21 +16,23 @@ const UNARY_PRI = 8;
 
 const BLOCK_FOLLOW = new Set(['end', 'else', 'elseif', 'until', '<eof>']);
 
-export function parse(tokens, chunkname) {
+export function parse(input, chunkname) {
+  const lx = createLexer(input, chunkname);
   let pos = 0;
-  let lastLine = tokens.length > 0 ? tokens[0].line : 0; // line of the last consumed token
+  let lastLine = lx.token(0).line; // line of the last consumed token
 
-  function peek() { return tokens[pos]; }
+  function peek() { return lx.token(pos); }
+  function peekAt(ahead) { return lx.token(pos + ahead); }
   function next() {
-    const t = tokens[pos++];
+    const t = lx.token(pos++);
     lastLine = t.line;
     return t;
   }
 
   function tokenText(t) {
     if (t.type === 'eof') return '<eof>';
-    if (t.type === 'string') return 'string';
-    if (t.type === 'number') return String(t.value);
+    if (t.type === 'string') return t.text !== undefined ? t.text : 'string';
+    if (t.type === 'number') return t.text !== undefined ? t.text : String(t.value);
     return String(t.value);
   }
 
@@ -58,12 +62,75 @@ export function parse(tokens, chunkname) {
     return t.value;
   }
 
-  // Per-function context for vararg / label checking.
-  function newFuncCtx(isVararg) {
-    return { isVararg, usesVararg: false, labels: new Set(), gotos: [] };
+  // Per-function context: vararg/label checking plus lexical scope resolution
+  // for Lua's local-variable (200) and upvalue (60) limits. `blocks` is a stack
+  // of Sets of in-scope local names; `upvals` is the set of resolved upvalues.
+  function newFuncCtx(isVararg, line, parent) {
+    return {
+      isVararg, usesVararg: false, labels: new Set(), gotos: [],
+      blocks: [], upvals: new Set(), line: line || 0, parent: parent || null,
+    };
   }
-  let funcCtx = newFuncCtx(true); // chunk is a vararg function
+  let funcCtx = newFuncCtx(true, 0, null); // chunk is a vararg function (main, line 0)
   let loopDepth = 0;
+
+  // Bound parser recursion depth like Lua's LUAI_MAXCCALLS, so pathologically
+  // nested source fails with "too many syntax levels" instead of overflowing JS.
+  let depth = 0;
+  function enterLevel() {
+    if (++depth > 200) {
+      const e = new LuaError(`${shortSrc(chunkname)}:${peek().line}: chunk has too many syntax levels`);
+      e.positioned = true;
+      throw e;
+    }
+  }
+  function leaveLevel() { depth--; }
+
+  function limitError(line, what, limit) {
+    const where = line === 0
+      ? `main function has more than ${limit} ${what}`
+      : `function at line ${line} has more than ${limit} ${what}`;
+    const e = new LuaError(`${shortSrc(chunkname)}:${peek().line}: ${where}`);
+    e.positioned = true;
+    throw e;
+  }
+
+  function activeCount(ctx) {
+    let n = 0;
+    for (const b of ctx.blocks) n += b.size;
+    return n;
+  }
+  function ctxHasLocal(ctx, name) {
+    for (let i = ctx.blocks.length - 1; i >= 0; i--) if (ctx.blocks[i].has(name)) return true;
+    return false;
+  }
+
+  // Declare a local in the current block; enforce the 200 active-local limit.
+  function declareLocal(name) {
+    funcCtx.blocks[funcCtx.blocks.length - 1].add(name);
+    if (activeCount(funcCtx) > 200) limitError(funcCtx.line, 'local variables', 200);
+  }
+  function declareLocals(names) { for (const n of names) declareLocal(n); }
+
+  // Resolve a name reference: if it's a local of an enclosing function, register
+  // it as an upvalue in each function along the way (enforcing the 60 limit).
+  function resolveName(name) {
+    if (ctxHasLocal(funcCtx, name)) return; // a local of the current function
+    const chain = [funcCtx];
+    for (let f = funcCtx.parent; f !== null; f = f.parent) {
+      if (ctxHasLocal(f, name)) {
+        for (const fc of chain) {
+          if (!fc.upvals.has(name)) {
+            fc.upvals.add(name);
+            if (fc.upvals.size > 60) limitError(fc.line, 'upvalues', 60);
+          }
+        }
+        return;
+      }
+      chain.push(f);
+    }
+    // not found in any enclosing function: it's a global
+  }
 
   function checkGotos(ctx) {
     for (const g of ctx.gotos) {
@@ -78,6 +145,13 @@ export function parse(tokens, chunkname) {
   // ---------- expressions ----------
 
   function parseExpr(limit = 0) {
+    enterLevel();
+    const e = parseExprBody(limit);
+    leaveLevel();
+    return e;
+  }
+
+  function parseExprBody(limit = 0) {
     let e;
     const t = peek();
     if (isToken(t, 'not') || isToken(t, '-') || isToken(t, '#')) {
@@ -126,6 +200,7 @@ export function parse(tokens, chunkname) {
     const t = peek();
     if (t.type === 'name') {
       next();
+      resolveName(t.value); // track upvalue usage for the 60-upvalue limit
       return { type: 'NameExpr', name: t.value, line: t.line };
     }
     if (isToken(t, '(')) {
@@ -200,7 +275,7 @@ export function parse(tokens, chunkname) {
         expect(']');
         expect('=');
         fields.push({ type: 'rec', key, value: parseExpr() });
-      } else if (peek().type === 'name' && isToken(tokens[pos + 1], '=')) {
+      } else if (peek().type === 'name' && isToken(peekAt(1), '=')) {
         const nameTok = next();
         next(); // '='
         fields.push({
@@ -231,9 +306,12 @@ export function parse(tokens, chunkname) {
     expect(')');
     const outerCtx = funcCtx;
     const outerLoopDepth = loopDepth;
-    funcCtx = newFuncCtx(isVararg);
+    funcCtx = newFuncCtx(isVararg, line, outerCtx);
     loopDepth = 0;
+    funcCtx.blocks.push(new Set()); // parameter scope, spanning the whole function
+    declareLocals(params);
     const body = parseBlock();
+    funcCtx.blocks.pop();
     checkGotos(funcCtx);
     // Lua 5.1 (LUA_COMPAT_VARARG): a vararg function gets an implicit 'arg'
     // table unless its body uses the '...' expression.
@@ -248,6 +326,7 @@ export function parse(tokens, chunkname) {
 
   function parseBlock() {
     const startTok = peek();
+    funcCtx.blocks.push(new Set()); // locals declared here leave scope at block end
     const stmts = [];
     for (;;) {
       const t = peek();
@@ -260,6 +339,7 @@ export function parse(tokens, chunkname) {
       if (s !== null) stmts.push(s);
       accept(';'); // Lua 5.1: each statement may be followed by one ';'
     }
+    funcCtx.blocks.pop();
     return { type: 'Block', stmts, line: startTok.line };
   }
 
@@ -278,6 +358,13 @@ export function parse(tokens, chunkname) {
   }
 
   function parseStatement() {
+    enterLevel();
+    const s = parseStatementBody();
+    leaveLevel();
+    return s;
+  }
+
+  function parseStatementBody() {
     const t = peek();
     if (isToken(t, '::')) {
       next();
@@ -369,7 +456,10 @@ export function parse(tokens, chunkname) {
       if (accept(',')) step = parseExpr();
       expect('do');
       loopDepth++;
+      funcCtx.blocks.push(new Set());
+      declareLocal(firstName); // control variable, scoped to the loop body
       const body = parseBlock();
+      funcCtx.blocks.pop();
       loopDepth--;
       expect('end', `(to close 'for' at line ${t.line})`);
       return { type: 'NumForStat', name: firstName, start, limit, step, body, line: t.line };
@@ -381,7 +471,10 @@ export function parse(tokens, chunkname) {
     do { exprs.push(parseExpr()); } while (accept(','));
     expect('do');
     loopDepth++;
+    funcCtx.blocks.push(new Set());
+    declareLocals(names); // loop variables, scoped to the loop body
     const body = parseBlock();
+    funcCtx.blocks.pop();
     loopDepth--;
     expect('end', `(to close 'for' at line ${t.line})`);
     return { type: 'GenForStat', names, exprs, body, line: t.line };
@@ -425,6 +518,7 @@ export function parse(tokens, chunkname) {
     const t = expect('local');
     if (accept('function')) {
       const name = expectName();
+      declareLocal(name); // the local function name is in scope inside its own body
       const func = parseFuncBody(name, false, t.line);
       return { type: 'LocalFuncStat', name, func, line: t.line };
     }
@@ -434,6 +528,7 @@ export function parse(tokens, chunkname) {
     if (accept('=')) {
       do { exprs.push(parseExpr()); } while (accept(','));
     }
+    declareLocals(names); // RHS already parsed, so these are not in scope for it
     return { type: 'LocalStat', names, exprs, line: t.line };
   }
 
@@ -454,7 +549,7 @@ export function parse(tokens, chunkname) {
       return { type: 'AssignStat', targets, exprs, line: t.line };
     }
     if (e.type !== 'CallExpr' && e.type !== 'MethodCallExpr') {
-      syntaxError('syntax error', t);
+      syntaxError('syntax error'); // reported at the current (offending) token
     }
     return { type: 'CallStat', expr: e, line: t.line };
   }

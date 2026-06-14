@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import {
   LuaError, LuaTable, LuaClosure, LuaUserdata, NativeFunction,
-  callValue, tostringMM, typeName, truthy, getMetatable,
+  callValue, runToCompletion, tostringMM, typeName, truthy, getMetatable,
   luaToNumber, numberToString, shortSrc,
 } from '../runtime.js';
 import { registrar, checkTable } from './helpers.js';
@@ -179,8 +179,22 @@ export default function install(I) {
       if (e instanceof LuaError) msg = e.luaMessage;
       else if (e instanceof RangeError) msg = 'stack overflow';
       else throw e;
-      const hvals = yield* callValue(handler, [msg]);
-      return [false, ...hvals];
+      // Expose the error's stack snapshot so a debug.traceback handler can see
+      // the (already-unwound) stack at the point the error was raised.
+      const saved = I._handlerFrames;
+      I._handlerFrames = (e instanceof LuaError) ? e._frames : undefined;
+      try {
+        const hvals = yield* callValue(handler, [msg]);
+        return [false, ...hvals];
+      } catch (he) {
+        // An error in the message handler itself yields LUA_ERRERR in Lua 5.1.
+        if (he instanceof LuaError || he instanceof RangeError) {
+          return [false, 'error in error handling'];
+        }
+        throw he;
+      } finally {
+        I._handlerFrames = saved;
+      }
     }
   });
 
@@ -257,22 +271,37 @@ export default function install(I) {
       return compileChunk(chunk, typeof chunkname === 'string' ? chunkname : chunk);
     }
     if (typeName(chunk) === 'function') {
-      const parts = [];
+      const name = typeof chunkname === 'string' ? chunkname : '=(load)';
+      let first;
       try {
-        for (;;) {
-          const piece = (yield* callValue(chunk, []))[0];
-          if (piece === undefined || piece === '') break;
-          if (typeof piece !== 'string') return [undefined, 'reader function must return a string'];
-          parts.push(piece);
+        // Read the first piece to detect a binary (dumped) chunk by its ESC
+        // signature, exactly as Lua does (this is the reader's first call).
+        first = (yield* callValue(chunk, []))[0];
+        if (typeof first === 'string' && first.charCodeAt(0) === 27) {
+          let s = first;
+          for (;;) {
+            const p = (yield* callValue(chunk, []))[0];
+            if (p === undefined || p === '') break;
+            if (typeof p !== 'string') return [undefined, 'reader function must return a string'];
+            s += p;
+          }
+          return compileChunk(s, name); // compileChunk reconstructs from DUMP_MAGIC
         }
       } catch (e) {
-        // An error in the reader function is reported like a load failure.
         if (e instanceof LuaError) {
-          return [undefined, typeof e.luaMessage === 'string' ? e.luaMessage : 'error in reader'];
+          return [undefined, typeof e.luaMessage === 'string' ? e.luaMessage : 'error in reader function'];
         }
         throw e;
       }
-      return compileChunk(parts.join(''), typeof chunkname === 'string' ? chunkname : '=(load)');
+      // Source chunk: hand the parser a JS reader that replays the first piece
+      // then pulls the rest lazily, so it reads only as far as parsing needs.
+      // Reader errors surface as LuaError and are caught by compileChunk.
+      let pending = first;
+      const jsReader = () => {
+        if (pending !== undefined) { const p = pending; pending = undefined; return p; }
+        return runToCompletion(callValue(chunk, []))[0];
+      };
+      return compileChunk(jsReader, name);
     }
     throw new LuaError(`bad argument #1 to 'load' (function expected, got ${typeName(chunk)})`);
   });

@@ -104,16 +104,30 @@ export default function install(I) {
     const lines = [];
     if (msg !== undefined) lines.push(msg);
     lines.push('stack traceback:');
-    // Walk frames from the given level (1 = caller of traceback) outward.
-    for (let i = I.frames.length - level; i >= 0; i--) {
-      const fr = I.frames[i];
-      const c = fr.closure;
-      const src = shortSrc(c.chunkname || '=?');
-      let where;
-      if (fr.callName) where = `in function '${fr.callName}'`;
-      else if ((c.proto.line || 0) === 0) where = 'in main chunk';
-      else where = `in function <${src}:${c.proto.line || 0}>`;
-      lines.push(`\t${src}:${fr.line}: ${where}`);
+    if (I._handlerFrames !== undefined) {
+      // Inside an xpcall handler: use the snapshot taken when the error was
+      // raised (the live stack has already unwound). Snapshot is innermost-first.
+      const snap = I._handlerFrames;
+      for (let i = level - 1; i < snap.length; i++) {
+        const fr = snap[i];
+        let where;
+        if (fr.name) where = `in function '${fr.name}'`;
+        else if (fr.main) where = 'in main chunk';
+        else where = `in function <${fr.src}:?>`;
+        lines.push(`\t${fr.src}:${fr.line}: ${where}`);
+      }
+    } else {
+      // Walk live frames from the given level (1 = caller of traceback) outward.
+      for (let i = I.frames.length - level; i >= 0; i--) {
+        const fr = I.frames[i];
+        const c = fr.closure;
+        const src = shortSrc(c.chunkname || '=?');
+        let where;
+        if (fr.callName) where = `in function '${fr.callName}'`;
+        else if ((c.proto.line || 0) === 0) where = 'in main chunk';
+        else where = `in function <${src}:${c.proto.line || 0}>`;
+        lines.push(`\t${src}:${fr.line}: ${where}`);
+      }
     }
     lines.push('\t[C]: ?');
     return [lines.join('\n')];

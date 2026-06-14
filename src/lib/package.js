@@ -30,13 +30,18 @@ export default function install(I) {
 
   function searchFile(name) {
     const rel = name.replace(/\./g, '/');
-    const path = String(pkg.get('path'));
     const tried = [];
-    for (const tmpl of path.split(';')) {
+    for (const tmpl of String(pkg.get('path')).split(';')) {
       if (tmpl === '') continue;
       const fn = tmpl.replace(/\?/g, rel);
       if (fs.existsSync(fn)) return { fn };
       tried.push(`\tno file '${fn}'`);
+    }
+    // C loaders aren't supported, but the error must still list cpath templates
+    // (the reference 'require' reports every path it tried).
+    for (const tmpl of String(pkg.get('cpath')).split(';')) {
+      if (tmpl === '') continue;
+      tried.push(`\tno file '${tmpl.replace(/\?/g, rel)}'`);
     }
     return { err: tried.join('\n') };
   }
@@ -46,11 +51,11 @@ export default function install(I) {
     if (typeof name !== 'string') {
       throw new LuaError(`bad argument #1 to 'require' (string expected, got ${typeName(name)})`);
     }
+    // Lua tests truthiness: a module that returned false (or nil) is reloaded.
     const already = loaded.get(name);
-    if (already !== undefined) return [already];
+    if (already !== undefined && already !== false) return [already];
 
     let loader = preload.get(name);
-    let arg = name;
     if (loader === undefined) {
       const found = searchFile(name);
       if (found.fn === undefined) {
@@ -58,11 +63,11 @@ export default function install(I) {
       }
       const source = fs.readFileSync(found.fn, 'latin1').replace(/^#![^\n]*/, '');
       loader = I.compile(source, '@' + found.fn);
-      arg = found.fn;
     }
     // Mark as loaded-in-progress sentinel value true to mirror Lua semantics.
     loaded.set(name, true);
-    const res = (yield* callValue(loader, [name, arg]))[0];
+    // Lua 5.1 passes only the module name to the loader.
+    const res = (yield* callValue(loader, [name]))[0];
     if (res !== undefined) loaded.set(name, res);
     return [loaded.get(name)];
   });
@@ -73,14 +78,32 @@ export default function install(I) {
     if (typeof name !== 'string') {
       throw new LuaError(`bad argument #1 to 'module' (string expected, got ${typeName(name)})`);
     }
-    let mod = loaded.get(name);
-    if (!(mod instanceof LuaTable)) {
-      mod = new LuaTable();
+    // Find or create the module table at its dotted position in the globals,
+    // creating intermediate tables and REUSING any table already there (so a
+    // table that was an intermediate keeps its existing fields).
+    const parts = name.split('.');
+    let tbl = G;
+    for (let k = 0; k < parts.length - 1; k++) {
+      let next = tbl.get(parts[k]);
+      if (next === undefined) { next = new LuaTable(); tbl.set(parts[k], next); }
+      else if (!(next instanceof LuaTable)) throw new LuaError(`name conflict for module '${name}'`);
+      tbl = next;
+    }
+    const last = parts[parts.length - 1];
+    let mod = tbl.get(last);
+    if (mod === undefined) {
+      mod = loaded.get(name) instanceof LuaTable ? loaded.get(name) : new LuaTable();
+      tbl.set(last, mod);
+    } else if (!(mod instanceof LuaTable)) {
+      throw new LuaError(`name conflict for module '${name}'`);
+    }
+    if (mod.get('_NAME') === undefined) { // initialize a fresh module table
       mod.set('_NAME', name);
       mod.set('_M', mod);
-      mod.set('_PACKAGE', name.replace(/\.[^.]*$/, ''));
-      loaded.set(name, mod);
+      const dot = name.lastIndexOf('.');
+      mod.set('_PACKAGE', dot >= 0 ? name.slice(0, dot + 1) : ''); // up to last '.'
     }
+    loaded.set(name, mod);
     // Set the calling function's environment to the module table.
     const caller = I.frames[I.frames.length - 1];
     if (caller !== undefined) caller.closure.env = mod;
