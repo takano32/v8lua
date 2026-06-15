@@ -559,5 +559,7 @@ export function parse(input, chunkname) {
   const body = parseBlock();
   checkGotos(funcCtx);
   if (peek().type !== 'eof') syntaxError("'<eof>' expected");
-  return { type: 'Chunk', body, line: 1 };
+  // lastLine = line of the last real token; used as the chunk's implicit-return
+  // line for debug line hooks.
+  return { type: 'Chunk', body, line: 1, lastline: lastLine };
 }

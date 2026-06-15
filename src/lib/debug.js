@@ -5,7 +5,7 @@ import {
   getMetatable, setTypeMetatable, typeName, shortSrc,
 } from '../runtime.js';
 import { registrar } from './helpers.js';
-import { closureUpvalues } from '../interp.js';
+import { closureUpvalues, frameLocals } from '../interp.js';
 
 // Collect the set of statement lines in a function body (for getinfo "L").
 function activeLines(proto) {
@@ -136,6 +136,7 @@ export default function install(I) {
   native('sethook', function* (I, args) {
     const fn = args[0];
     const mask = typeof args[1] === 'string' ? args[1] : '';
+    const count = typeof args[2] === 'number' ? args[2] : 0;
     if (fn === undefined || fn === null) {
       I.hook = null;
       return [];
@@ -143,16 +144,23 @@ export default function install(I) {
     I.hook = {
       fn,
       mask,
+      count,
       line: mask.includes('l'),
       call: mask.includes('c'),
       ret: mask.includes('r'),
     };
+    // The frame that installs the hook is already mid-line; baseline its
+    // line so the next same-line statement doesn't fire a spurious event.
+    const top = I.frames[I.frames.length - 1];
+    if (top !== undefined) top.hookLine = top.line;
     return [];
   });
 
   native('gethook', function* (I, args) {
-    if (I.hook === null) return [undefined];
-    return [I.hook.fn, I.hook.mask];
+    if (I.hook === null) return [undefined, '', 0];
+    // Mask is reported in canonical order: call, return, line.
+    const mask = (I.hook.call ? 'c' : '') + (I.hook.ret ? 'r' : '') + (I.hook.line ? 'l' : '');
+    return [I.hook.fn, mask, I.hook.count || 0];
   });
 
   native('getupvalue', function* (I, args) {
@@ -206,10 +214,39 @@ export default function install(I) {
     throw new LuaError("'setfenv' cannot change environment of given object");
   });
 
-  // Local-variable access is not supported (the tree-walker has no register
-  // model); report "no locals" rather than crashing.
-  native('getlocal', function* (I, args) { return [undefined]; });
-  native('setlocal', function* (I, args) { return [undefined]; });
+  // Local variables of the function at a stack level, by register (declaration)
+  // order. Level 1 = the function calling getlocal (getlocal is native and not
+  // on the frame stack), so level N -> frames[len - N].
+  native('getlocal', function* (I, args) {
+    const level = Math.trunc(args[0]);
+    const n = Math.trunc(args[1]);
+    // Level 0 = the running C function's own stack slots (its arguments),
+    // reported as unnamed temporaries (Lua's "(*temporary)").
+    if (level === 0) {
+      if (n >= 1 && n <= args.length) return ['(*temporary)', args[n - 1]];
+      return [undefined];
+    }
+    const idx = I.frames.length - level;
+    if (idx < 0 || idx >= I.frames.length) {
+      throw new LuaError("bad argument #1 to 'getlocal' (level out of range)");
+    }
+    const locals = frameLocals(I.frames[idx]);
+    if (n < 1 || n > locals.length) return [undefined];
+    return [locals[n - 1].name, locals[n - 1].cell.v];
+  });
+
+  native('setlocal', function* (I, args) {
+    const level = Math.trunc(args[0]);
+    const n = Math.trunc(args[1]);
+    const idx = I.frames.length - level;
+    if (idx < 0 || idx >= I.frames.length) {
+      throw new LuaError("bad argument #1 to 'setlocal' (level out of range)");
+    }
+    const locals = frameLocals(I.frames[idx]);
+    if (n < 1 || n > locals.length) return [undefined];
+    locals[n - 1].cell.v = args[2];
+    return [locals[n - 1].name];
+  });
   native('getregistry', function* (I, args) { return [new LuaTable()]; });
 
   I.globals.set('debug', lib);

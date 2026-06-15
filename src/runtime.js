@@ -321,6 +321,22 @@ export function* callValue(f, args) {
   for (let depth = 0; depth < 100; depth++) {
     if (f instanceof LuaClosure) return yield* closureCall(f, args);
     if (f instanceof NativeFunction) {
+      const I = currentInterp;
+      // Fire call/return debug hooks for C functions too. The frame is pushed
+      // only around the hook (so getinfo(2) in the hook sees this native), then
+      // popped so the native body runs frameless and level math stays correct.
+      if (I !== null && I.hook !== null && (I.hook.call || I.hook.ret)) {
+        if (I.hook.call) {
+          I.frames.push({ closure: f, line: -1 });
+          try { yield* I.fireHook('call'); } finally { I.frames.pop(); }
+        }
+        const r = yield* f.fn(I, args);
+        if (I.hook !== null && I.hook.ret) {
+          I.frames.push({ closure: f, line: -1 });
+          try { yield* I.fireHook('return'); } finally { I.frames.pop(); }
+        }
+        return r === undefined ? [] : r;
+      }
       const r = yield* f.fn(currentInterp, args);
       return r === undefined ? [] : r;
     }

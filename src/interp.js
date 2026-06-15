@@ -131,6 +131,21 @@ export function freeVarNames(proto) {
   return out;
 }
 
+// Active locals of a frame in Lua register (declaration) order: the function
+// scope's variables first, then each nested active block's, innermost last.
+export function frameLocals(frame) {
+  if (frame === undefined || frame.scope === undefined) return [];
+  const chain = [];
+  for (let s = frame.scope; s !== null; s = s.parent) {
+    chain.push(s);
+    if (Object.prototype.hasOwnProperty.call(s, 'varargs')) break; // function boundary
+  }
+  chain.reverse();
+  const out = [];
+  for (const s of chain) for (const [name, cell] of s.vars) out.push({ name, cell });
+  return out;
+}
+
 // A closure's upvalues: free variable names that resolve to a cell in an
 // enclosing scope (names that resolve to nothing are globals, not upvalues).
 export function closureUpvalues(closure) {
@@ -163,6 +178,7 @@ function* closureCall(closure, args) {
   I._pendingKind = undefined;
   I.frames.push(frame);
   try {
+    if (I.hook !== null && I.hook.call) yield* I.fireHook('call');
     for (;;) {
       const proto = closure.proto;
       const scope = new Scope(closure.scope);
@@ -186,15 +202,25 @@ function* closureCall(closure, args) {
       } finally {
         I.chunkname = savedChunk;
       }
-      if (c === undefined) return [];
-      if (c.type === 'return') return c.values;
+      if (c === undefined) {
+        // implicit return: Lua emits a final RETURN at the function's last line
+        if (I.hook !== null && I.hook.line) yield* I.lineEvent(closure.proto.lastline || frame.line);
+        if (I.hook !== null && I.hook.ret) yield* I.fireHook('return');
+        return [];
+      }
+      if (c.type === 'return') {
+        if (I.hook !== null && I.hook.ret) yield* I.fireHook('return');
+        return c.values;
+      }
       if (c.type === 'tailcall') {
         if (c.f instanceof LuaClosure) {
           closure = c.f;
           frame.closure = closure; // tail call replaces the activation
+          frame.hookLine = undefined; // new activation: reset line-hook tracking
           args = c.args;
           continue;
         }
+        if (I.hook !== null && I.hook.ret) yield* I.fireHook('return');
         return yield* callValue(c.f, c.args);
       }
       // goto with no matching label anywhere in the function body
@@ -232,7 +258,7 @@ export class Interp {
     const ast = parse(source, chunkname);
     const proto = {
       type: 'FuncExpr', params: [], isVararg: true,
-      body: ast.body, name: chunkname, line: 0,
+      body: ast.body, name: chunkname, line: 0, lastline: ast.lastline || 0,
     };
     const closure = new LuaClosure(proto, null, chunkname, this);
     closure.chunkname = chunkname;
@@ -355,13 +381,8 @@ export class Interp {
 
   *execStat(stmt, scope) {
     const top = this.frames[this.frames.length - 1];
-    const prevLine = top !== undefined ? top.line : -1;
     this.currentLine = stmt.line;
-    if (top !== undefined) top.line = stmt.line; // for error()/debug level walking
-    // debug line hook: fire when execution moves to a different line.
-    if (this.hook !== null && this.hook.line && !this.inHook && stmt.line !== prevLine) {
-      yield* this.fireHook('line', stmt.line);
-    }
+    if (top !== undefined) { top.line = stmt.line; top.scope = scope; } // for error()/debug
     try {
       return yield* this.execStatInner(stmt, scope);
     } catch (e) {
@@ -369,9 +390,23 @@ export class Interp {
     }
   }
 
+  // Emit a debug "line" event when execution reaches a different source line
+  // than the previous one (per-frame), mirroring Lua's per-instruction hook.
+  // `force` fires even on the same line, for loop-back (backward-jump) points.
+  *lineEvent(line, force) {
+    if (this.hook === null || !this.hook.line || this.inHook) return;
+    const top = this.frames[this.frames.length - 1];
+    if (top === undefined) return;
+    if (!force && top.hookLine === line) return;
+    top.hookLine = line;
+    yield* this.fireHook('line', line);
+  }
+
   *execStatInner(stmt, scope) {
     switch (stmt.type) {
       case 'LocalStat': {
+        // A `local x` with no initializer generates no code (no line event).
+        if (this.hook !== null && stmt.exprs.length > 0) yield* this.lineEvent(stmt.line);
         const vals = yield* this.evalMulti(stmt.exprs, scope);
         for (let i = 0; i < stmt.names.length; i++) {
           scope.vars.set(stmt.names[i], { v: vals[i] });
@@ -379,6 +414,7 @@ export class Interp {
         return;
       }
       case 'LocalFuncStat': {
+        if (this.hook !== null) yield* this.lineEvent(stmt.line);
         const cell = { v: undefined };
         scope.vars.set(stmt.name, cell);
         const f = new LuaClosure(stmt.func, scope, stmt.name, this);
@@ -388,6 +424,7 @@ export class Interp {
         return;
       }
       case 'AssignStat': {
+        if (this.hook !== null) yield* this.lineEvent(stmt.line);
         // Lua evaluates all target table/key subexpressions BEFORE the RHS and
         // before any store, so later stores can't perturb earlier targets.
         const refs = [];
@@ -418,12 +455,14 @@ export class Interp {
         return;
       }
       case 'CallStat':
+        if (this.hook !== null) yield* this.lineEvent(stmt.line);
         yield* this.evalCall(stmt.expr, scope);
         return;
       case 'DoStat':
         return yield* this.execBlock(stmt.body, new Scope(scope));
       case 'IfStat': {
         for (const clause of stmt.clauses) {
+          if (this.hook !== null) yield* this.lineEvent(clause.cond.line);
           if (truthy(yield* this.evalExpr(clause.cond, scope))) {
             return yield* this.execBlock(clause.body, new Scope(scope));
           }
@@ -434,7 +473,9 @@ export class Interp {
         return;
       }
       case 'WhileStat': {
-        while (truthy(yield* this.evalExpr(stmt.cond, scope))) {
+        for (;;) {
+          if (this.hook !== null) yield* this.lineEvent(stmt.cond.line, true);
+          if (!truthy(yield* this.evalExpr(stmt.cond, scope))) break;
           const c = yield* this.execBlock(stmt.body, new Scope(scope));
           if (c !== undefined) {
             if (c.type === 'break') break;
@@ -452,6 +493,7 @@ export class Interp {
             return c;
           }
           // the until-condition sees the body's locals (Lua scoping rule)
+          if (this.hook !== null) yield* this.lineEvent(stmt.cond.line, true);
           if (truthy(yield* this.evalExpr(stmt.cond, bodyScope))) break;
         }
         return;
@@ -466,7 +508,10 @@ export class Interp {
           stepV = luaToNumber(yield* this.evalExpr(stmt.step, scope));
           if (stepV === undefined) throw new LuaError("'for' step must be a number");
         }
-        for (let i = startV; stepV > 0 ? i <= limitV : i >= limitV; i += stepV) {
+        for (let i = startV; ; i += stepV) {
+          // Lua's FORLOOP check is attributed to the 'for' line, fired each pass.
+          if (this.hook !== null) yield* this.lineEvent(stmt.line, true);
+          if (!(stepV > 0 ? i <= limitV : i >= limitV)) break;
           const iterScope = new Scope(scope);
           iterScope.vars.set(stmt.name, { v: i }); // fresh cell per iteration
           const c = yield* this.execBlock(stmt.body, iterScope);
@@ -485,6 +530,7 @@ export class Interp {
         // Lua attributes the iterator call to the line of the 'in' expressions.
         const iterLine = stmt.exprs[stmt.exprs.length - 1].line;
         for (;;) {
+          if (this.hook !== null) yield* this.lineEvent(stmt.line, true); // TFORLOOP at the 'for' line
           let rets;
           try {
             rets = yield* callValue(f, [s, control]);
@@ -506,6 +552,7 @@ export class Interp {
         return;
       }
       case 'ReturnStat': {
+        if (this.hook !== null) yield* this.lineEvent(stmt.line);
         if (stmt.exprs.length === 1) {
           const e = stmt.exprs[0];
           if (e.type === 'CallExpr' || e.type === 'MethodCallExpr') {
@@ -517,8 +564,10 @@ export class Interp {
         return { type: 'return', values: yield* this.evalMulti(stmt.exprs, scope) };
       }
       case 'BreakStat':
+        if (this.hook !== null) yield* this.lineEvent(stmt.line);
         return { type: 'break' };
       case 'GotoStat':
+        if (this.hook !== null) yield* this.lineEvent(stmt.line);
         return { type: 'goto', label: stmt.label };
       case 'LabelStat':
         return;
