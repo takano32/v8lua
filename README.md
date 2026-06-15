@@ -12,16 +12,16 @@ including number formatting (`%.14g`), error messages with variable-name hints
 
 ```sh
 # run a script
-node bin/v8lua.js script.lua [args...]
+node bin/lua.js script.lua [args...]
 
 # one-liner
-node bin/v8lua.js -e 'print("hello from lua on v8")'
+node bin/lua.js -e 'print("hello from lua on v8")'
 
 # REPL
-node bin/v8lua.js
+node bin/lua.js
 
 # piped stdin
-echo 'print(2^10)' | node bin/v8lua.js
+echo 'print(2^10)' | node bin/lua.js
 ```
 
 Embedding from JavaScript:
@@ -63,7 +63,7 @@ program.
 | `src/lib/lpattern.js` | Lua pattern matcher (port of lstrlib.c logic) |
 | `src/lib/*.js` | base / string / table / math / os / io / coroutine libs |
 | `src/stdlib.js`, `src/index.js` | assembly + embed API |
-| `bin/v8lua.js` | CLI and REPL |
+| `bin/lua.js` | CLI and REPL |
 | `docs/SPEC.md` | the binding contract the modules were built against |
 | `docs/TASKS.md` | the fine-grained task breakdown used to build this |
 
