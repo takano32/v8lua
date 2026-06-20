@@ -3,6 +3,11 @@ name: Publish to npm
 # Publish on every push to master, but only when package.json's version is not
 # already on npm. Bump the version to trigger a release; ordinary pushes that
 # don't change the version are skipped.
+#
+# Authentication uses npm Trusted Publishing (OIDC): no token is stored in
+# GitHub. npm verifies this workflow's identity via the id-token. Configure the
+# trusted publisher on npmjs.com -> package -> Settings -> Trusted Publisher
+# (repository: takano32/v8lua, workflow: .github/workflows/publish.yml).
 on:
   push:
     branches: [master]
@@ -12,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write # required for npm provenance
+      id-token: write # required for npm Trusted Publishing (OIDC)
     steps:
       - uses: actions/checkout@v4
 
@@ -20,6 +25,10 @@ jobs:
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
+
+      # Trusted Publishing needs npm 11.5.1+; node 20 ships an older npm.
+      - name: Upgrade npm
+        run: npm install -g npm@latest
 
       - name: Run tests
         run: npm test
@@ -38,8 +47,8 @@ jobs:
             echo "$NAME@$VERSION is new; will publish."
           fi
 
+      # No NODE_AUTH_TOKEN: with id-token: write and npm 11.5.1+, npm performs
+      # the OIDC token exchange automatically. Provenance is implied.
       - name: Publish
         if: steps.check.outputs.published == 'false'
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
