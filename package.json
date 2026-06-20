@@ -1,9 +1,11 @@
 {
   "name": "v8lua",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Lua 5.1 interpreter running on V8 (Node.js), written in plain JavaScript",
   "type": "module",
-  "bin": { "v8lua": "v8lua" },
+  "bin": {
+    "v8lua": "v8lua"
+  },
   "main": "src/index.js",
   "files": [
     "v8lua",
@@ -19,9 +21,19 @@
     "url": "git+https://github.com/takano32/v8lua.git"
   },
   "homepage": "https://github.com/takano32/v8lua#readme",
-  "bugs": { "url": "https://github.com/takano32/v8lua/issues" },
-  "keywords": ["lua", "interpreter", "lua5.1", "language", "vm"],
+  "bugs": {
+    "url": "https://github.com/takano32/v8lua/issues"
+  },
+  "keywords": [
+    "lua",
+    "interpreter",
+    "lua5.1",
+    "language",
+    "vm"
+  ],
   "author": "TAKANO Mitsuhiro",
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "license": "MIT"
 }
