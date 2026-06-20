@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Lua 5.1 interpreter running on V8 (Node.js), written in plain JavaScript",
   "type": "module",
-  "bin": { "v8lua": "bin/lua.js" },
+  "bin": { "v8lua": "v8lua" },
   "main": "src/index.js",
   "scripts": {
     "test": "node tests/run.js"

@@ -26,7 +26,7 @@ Already present (do not rewrite from scratch):
 - `docs/SPEC.md` — the contract (authoritative).
 - `package.json` — done.
 - `src/lexer.js` — written but **unverified** (T01 verifies/fixes it).
-- `src/stdlib.js`, `src/index.js`, `bin/lua.js` — integration shims, written
+- `src/stdlib.js`, `src/index.js`, `v8lua` — integration shims, written
   against SPEC; verified in T27.
 
 Dependency notation: `Depends: T05` means that task must be completed first.
@@ -350,7 +350,7 @@ Dependency notation: `Depends: T05` means that task must be completed first.
   `os.time{year=2000,month=1,day=1,hour=0}` (beware TZ — set TZ=UTC env for
   BOTH sides in the script and use '!' formats), `os.date('!%Y-%m-%d %H:%M:%S', 0)`,
   `os.date('!*t', 86400).yday`, difftime; io.write number formatting; io.read
-  smoke-tested by piping stdin to a child `bin/lua.js` run.
+  smoke-tested by piping stdin to a child `v8lua` run.
 
 ## Phase 6 — Conformance tests and integration
 
@@ -386,10 +386,10 @@ Dependency notation: `Depends: T05` means that task must be completed first.
 ### T27 — Integration pass
 **Files:** any (fix-ups) · **Depends:** T25, T26
 - Run `npm test`; fix remaining drift (typical: export-name mismatches,
-  forgotten yield*, error-message diffs). Verify `bin/lua.js`:
-  `echo 'print("hi", 1+1)' | node bin/lua.js`, `node bin/lua.js -e 'print(_VERSION)'`,
-  REPL echo (`printf '1+2\nlocal x=3\nx*2\n' | node bin/lua.js -i`),
-  `node bin/lua.js tests/lua/15-stress.lua`. Verify `src/index.js` exports
+  forgotten yield*, error-message diffs). Verify `v8lua`:
+  `echo 'print("hi", 1+1)' | node v8lua`, `node v8lua -e 'print(_VERSION)'`,
+  REPL echo (`printf '1+2\nlocal x=3\nx*2\n' | node v8lua -i`),
+  `node v8lua tests/lua/15-stress.lua`. Verify `src/index.js` exports
   work (`runSource('return 1+1')` → [2]).
 - Acceptance: full `npm test` green; CLI checks above produce expected output;
   `node --check` clean on every src/bin/tests file.

@@ -3,8 +3,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-import { createInterp, formatError } from '../src/index.js';
-import { LuaTable, tostringMM, runToCompletion } from '../src/runtime.js';
+import { createInterp, formatError } from './src/index.js';
+import { LuaTable, tostringMM, runToCompletion } from './src/runtime.js';
 
 const VERSION = 'v8lua 0.1.0 — Lua 5.1 on V8 (Node.js ' + process.version + ')';
 

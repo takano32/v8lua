@@ -12,8 +12,8 @@ external dependencies, Node >= 18.
 ## File layout
 
 ```
-package.json          { "type": "module", "bin": { "v8lua": "bin/lua.js" } }
-bin/lua.js          CLI + REPL (written during integration; do not write)
+package.json          { "type": "module", "bin": { "v8lua": "v8lua" } }
+v8lua          CLI + REPL (written during integration; do not write)
 src/lexer.js          tokenizer
 src/parser.js         tokens -> AST
 src/runtime.js        values, LuaTable, errors, metamethod-aware operations
