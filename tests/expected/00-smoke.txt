@@ -1,0 +1,9 @@
+hello	2	7
+counter	3
+V8LUA	ababab
+hell0 w0rld	2
+1	2	3	3
+nil	function	nil	16
+1 2 3 
+11	10
+false	boom

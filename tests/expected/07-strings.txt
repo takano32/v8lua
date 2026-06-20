@@ -1,0 +1,12 @@
+12	12	HELLO, WORLD	hello, world
+Hello	World	World	ello, Worl	Hel	
+Hello, World
+abcabcabc	ab-ab	
+olleh
+65	98	97	99
+Hi
+2
+13
+MIXED123	mixed123
+4
+B

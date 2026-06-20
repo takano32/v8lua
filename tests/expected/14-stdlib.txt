@@ -1,0 +1,31 @@
+nil	boolean	number	string	table	function	thread
+10	10	31	1000	nil	nil
+255	255	35	5	nil
+3.5	-3.5	0.5	5
+42	nil
+nil	true	12	1.25
+0	1	3
+true	true
+a=1 m=13 z=26 
+5	5	5	1
+inf	-inf	true
+3.141593
+-1	-0
+1	-1	1
+3	0.7
+-3	-0.7
+4	1	0
+3.0000
+180.0000 3.1416
+true
+true	true	true	true
+true
+1970-01-01 00:00:00
+1970-01-02
+1970	1	1	23	59	59	5	1	false
+6
+number	number
+nil
+io.write 1 2.5
+true
+Lua 5.1

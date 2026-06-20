@@ -1,0 +1,25 @@
+suspended
+start	1	2
+true	3
+suspended
+got	10
+true	20
+got2	x	y
+true	fin
+dead
+false	cannot resume dead coroutine
+1 4 9 16
+r1 r2 r3 
+inner sees self as	running
+outer status while sub suspended	suspended
+true	subyield
+true	subdone
+true	outeryield
+true	outerdone
+false	kaboom
+dead
+false	wrapped
+from a
+deep done
+0	5	15	16
+true

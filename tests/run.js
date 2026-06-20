@@ -100,4 +100,10 @@ for (const name of files) {
 }
 
 console.log(`\n${passed} passed, ${failed} failed${skipped ? `, ${skipped} skipped` : ''}`);
+// Guard against a silent no-op run (e.g. CI without luajit and without
+// committed snapshots): if nothing actually ran, treat it as a failure.
+if (passed === 0 && failed === 0) {
+  console.error('error: no tests were run (no luajit oracle and no expected snapshots).');
+  process.exit(1);
+}
 process.exit(failed === 0 ? 0 : 1);

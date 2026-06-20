@@ -1,0 +1,9 @@
+3
+a	b
+true	true
+42
+10
+2	1
+Lua 5.1
+true
+false	gen

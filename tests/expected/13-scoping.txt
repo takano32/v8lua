@@ -1,0 +1,10 @@
+inner
+outer
+2
+120
+tries	3
+1 2 3 10 20 
+a	b
+2
+local	global
+12	13

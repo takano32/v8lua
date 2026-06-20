@@ -1,0 +1,40 @@
+5	5
+8	8
+nil
+3	4
+2	2
+5	9
+1	2
+4	5
+1	5
+1	0
+key	value
+2	3
+trim me
+2026	06	11
+nil
+nil
+x123y
+tag
+one.two.three.
+a:1 b:2 
+empty gmatch	4
+hell0 w0rld	2
+heLlo	1
+-a-b-c-	4
+<hello> <world>	2
+me swap	1
+aabbcc	3
+a+b+c	2
+heLLo	1
+x:11, y:12	2
+keep	1
+CARET anchor	1
+5	9
+quick
+char ALPHA class	1
+hel
+hell
+aaa
+1F
+up down	1

@@ -1,0 +1,7 @@
+primes	168	76127
+fib50	12586269025
+balance	120
+false	insufficient funds
+savings	330
+pipeline	819
+checksum	123	390009

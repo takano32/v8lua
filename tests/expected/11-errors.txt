@@ -1,0 +1,21 @@
+true	1	2
+false	plain
+false	nil
+false	nil
+false	true	42
+false	/home/takano32/GitHub/v8lua/tests/lua/11-errors.lua:11: 123
+false	assertion failed!
+false	custom
+1	2	3
+false	table	1
+false	 attempt to perform arithmetic on a nil value
+false	 attempt to index local 'x' (a nil value)
+false	 attempt to call local 'f' (a nil value)
+false	 attempt to compare two table values
+false	 attempt to concatenate a boolean value
+false	 attempt to get length of a number value
+true	fine
+false	handled:oops
+false	outer:inner
+false	table	obj
+true	1	nil	three

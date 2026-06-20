@@ -1,0 +1,12 @@
+hi	1	nil
+1
+dyn:foo	dyn:bar
+10	nil
+7	6	-3
+false	true	true	true	false
+3|4	3|end	start|4
+V(3)	30
+LOCKED
+false	cannot change a protected metatable
+true	nil
+true	false
