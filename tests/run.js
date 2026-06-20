@@ -9,6 +9,7 @@ import installStdlib from '../src/stdlib.js';
 import { LuaError, luaToDisplayString } from '../src/runtime.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.join(here, '..');
 const luaDir = path.join(here, 'lua');
 const expectedDir = path.join(here, 'expected');
 
@@ -27,24 +28,28 @@ try {
   haveLuajit = false;
 }
 
-function oracleOutput(file, name) {
+function oracleOutput(relFile, name) {
   if (haveLuajit) {
-    return execFileSync('luajit', [file], { encoding: 'utf8', env: { ...process.env, TZ: 'UTC' } });
+    // Run luajit from the repo root with a relative path so any file path that
+    // leaks into output (e.g. error positions) is machine-independent and the
+    // committed snapshots stay portable across CI and local checkouts.
+    return execFileSync('luajit', [relFile], { encoding: 'utf8', cwd: repoRoot, env: { ...process.env, TZ: 'UTC' } });
   }
   const exp = path.join(expectedDir, name.replace(/\.lua$/, '.txt'));
   if (fs.existsSync(exp)) return fs.readFileSync(exp, 'utf8');
   return null;
 }
 
-function v8luaOutput(file, name) {
+function v8luaOutput(absFile, relFile) {
   const out = [];
   // chunkname must match what luajit sees so error-position strings compare
   // equal. Lua tags file chunks with '@<path>'; short_src renders that as the
-  // path, matching luajit's output for the same file.
-  const chunk = '@' + file;
+  // path, matching luajit's output for the same file. Use the same relative
+  // path luajit was given so the strings match regardless of checkout dir.
+  const chunk = '@' + relFile;
   const I = new Interp({ stdout: (s) => out.push(s), chunkname: chunk });
   installStdlib(I);
-  const source = fs.readFileSync(file, 'utf8');
+  const source = fs.readFileSync(absFile, 'utf8');
   try {
     I.run(source, chunk, []);
   } catch (e) {
@@ -77,7 +82,8 @@ let skipped = 0;
 for (const name of files) {
   if (only !== null && !name.includes(only)) continue;
   const file = path.join(luaDir, name);
-  const want = oracleOutput(file, name);
+  const relFile = path.relative(repoRoot, file);
+  const want = oracleOutput(relFile, name);
   if (want === null) {
     console.log(`SKIP ${name} (no oracle, no expected file)`);
     skipped++;
@@ -88,7 +94,7 @@ for (const name of files) {
     fs.writeFileSync(path.join(expectedDir, name.replace(/\.lua$/, '.txt')), want);
   }
   process.env.TZ = 'UTC';
-  const got = v8luaOutput(file, name);
+  const got = v8luaOutput(file, relFile);
   if (got === want) {
     console.log(`\x1b[32mPASS\x1b[0m ${name}`);
     passed++;

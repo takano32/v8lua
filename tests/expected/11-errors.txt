@@ -3,7 +3,7 @@ false	plain
 false	nil
 false	nil
 false	true	42
-false	/home/takano32/GitHub/v8lua/tests/lua/11-errors.lua:11: 123
+false	tests/lua/11-errors.lua:11: 123
 false	assertion failed!
 false	custom
 1	2	3
